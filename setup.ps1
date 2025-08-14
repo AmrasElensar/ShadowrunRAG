@@ -1,34 +1,57 @@
-# Shadowrun RAG Docker Setup Script (PowerShell)
+# Shadowrun RAG Docker Setup Script (PowerShell 7)
 # For Windows 10/11 with Docker Desktop
+# Requires PowerShell 7+ and Administrator privileges
 
-# Auto-elevate to Administrator (if not already) ===
+# Auto-elevate to Administrator using PowerShell 7 (pwsh.exe)
 $isAdmin = ([Security.Principal.WindowsPrincipal] `
     [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(`
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin) {
-    Write-Host "${Yellow}⚠️  This script needs Administrator rights to set up 'shadowrun.local'${NC}"
-    Write-Host "${Yellow}   (so you can use http://shadowrun.local instead of localhost)${NC}"
-    Write-Host "${Blue}🔄 Attempting to restart as Administrator...${NC}"
-    
-    try {
-        Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs -Wait
-        exit
-    } catch {
-        Write-Host "${Red}❌ Admin access denied. Continuing without modifying hosts file.${NC}"
-        Write-Host "${Yellow}   You can still use http://localhost:8501${NC}"
+    Write-Host "⚠️  This script requires Administrator privileges to modify the hosts file."
+    Write-Host "🔄 Restarting as Administrator using PowerShell 7..."
+
+    # Ensure we use pwsh.exe (PowerShell 7), not powershell.exe (PS 5.1)
+    if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+        Write-Host "❌ PowerShell 7 is not installed. Please install it from: https://aka.ms/powershell"
+        Write-Host "👉 This script requires PowerShell 7 to avoid parsing errors during elevation."
+        Write-Host "   Press Enter to exit..." ; Read-Host
+        exit 1
     }
+
+    # Build arguments: use -NoExit to keep window open after script finishes
+    $Arguments = "-NoExit -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+
+    # Start elevated PowerShell 7 session
+    try {
+        Start-Process pwsh.exe -ArgumentList $Arguments -Verb RunAs
+    } catch {
+        Write-Host "❌ Failed to elevate: $($_.Exception.Message)"
+        Write-Host "   Please run this script manually as Administrator in PowerShell 7."
+        Write-Host "   Press Enter to exit..." ; Read-Host
+        exit 1
+    }
+
+    # Exit current non-elevated session
+    exit
 }
 
-# Set strict error handling ===
+# Now running as Admin in PowerShell 7
+Write-Host "🔐 Running as Administrator in PowerShell 7"
+
+# Set working directory to script location
+$ScriptDir = Split-Path $PSCommandPath -Parent
+Set-Location $ScriptDir
+Write-Host "📁 Script running in: $ScriptDir"
+
 $ErrorActionPreference = "Stop"
 
-# Colors
-$Green = "$([char]27)[32m"
+# Colors (ANSI escape codes - work in modern terminals)
+$Green  = "$([char]27)[32m"
 $Yellow = "$([char]27)[33m"
-$Blue = "$([char]27)[34m"
-$Red = "$([char]27)[31m"
-$NC = "$([char]27)[0m" # No Color
+$Blue   = "$([char]27)[34m"
+$Red    = "$([char]27)[31m"
+$NC     = "$([char]27)[0m"  # No Color
 
 Write-Host "${Blue}🎲 Setting up Shadowrun RAG with Docker...${NC}"
 
@@ -55,7 +78,15 @@ Write-Host "${Blue}📦 Preparing Ollama models...${NC}"
 
 Write-Host "Starting Ollama container..."
 docker-compose up -d ollama
-Start-Sleep -Seconds 5
+
+# Wait for container to be running
+Write-Host "${Blue}⏳ Waiting for Ollama container to start...${NC}"
+while ($true) {
+    $ContainerStatus = docker inspect shadowrun-ollama --format '{{.State.Running}}' 2>$null
+    if ($ContainerStatus -eq 'true') { break }
+    Start-Sleep -Seconds 2
+}
+Write-Host "${Green}✅ Ollama container is running${NC}"
 
 Write-Host "Pulling Mixtral 8x7B model (this may take a few minutes)..."
 try {
@@ -107,9 +138,9 @@ $Dirs = @(
 foreach ($Dir in $Dirs) {
     if (-not (Test-Path $Dir)) {
         New-Item -ItemType Directory -Path $Dir | Out-Null
-        Write-Host "${Green}Created: $Dir${NC}"
+        Write-Host "${Green}✅ Created: $Dir${NC}"
     } else {
-        Write-Host "${Green}Already exists: $Dir${NC}"
+        Write-Host "${Green}✅ Already exists: $Dir${NC}"
     }
 }
 
@@ -118,12 +149,15 @@ Write-Host "${Blue}🚀 Starting all services...${NC}"
 docker-compose up -d
 
 # Final message
+Write-Host ""
 Write-Host "${Green}✅ Setup complete!${NC}"
 Write-Host ""
-Write-Host "${Blue}Access your Shadowrun RAG system at:${NC}"
+Write-Host "${Blue}🎯 Access your Shadowrun RAG system at:${NC}"
 Write-Host "  - Web UI: http://shadowrun.local or http://localhost:8501"
 Write-Host "  - API: http://shadowrun.local/api or http://localhost:8000"
 Write-Host ""
-Write-Host "💡 Place your PDF rulebooks in: .\data\raw_pdfs\"
+Write-Host '💡 Place your PDF rulebooks in: .\data\raw_pdfs\'
 Write-Host ""
-Write-Host "${Yellow}Note: If shadowrun.local doesn't work, your browser may block it. Just use localhost.${NC}"
+Write-Host "${Yellow}ℹ️  If shadowrun.local doesn't work, your browser may block it. Just use localhost.${NC}"
+Write-Host ""
+Write-Host "🎉 Press Enter to close..." ; Read-Host

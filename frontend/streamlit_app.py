@@ -5,10 +5,13 @@ import streamlit as st
 import requests
 from pathlib import Path
 import json
-from typing import Optional
+import logging
 
 # API configuration
 API_URL = os.getenv("API_URL", "http://localhost:8000")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="Shadowrun RAG Assistant",
@@ -114,14 +117,13 @@ with st.sidebar:
         }[x]
     )
 
-    # === In sidebar, after query_type ===
-
     st.subheader("👤 Character Context")
     character_role = st.selectbox(
         "Character Role (optional)",
         ["None", "Decker", "Mage", "Street Samurai", "Rigger", "Adept", "Technomancer", "Face"],
         index=0
     )
+    st.caption("*Character role auto-filters to relevant section if no manual filter is selected*")
     character_role = None if character_role == "None" else character_role.lower().replace(" ", "_")
 
     character_stats = st.text_input(
@@ -147,6 +149,22 @@ with st.sidebar:
             )
             filter_source = None if filter_source == "All" else filter_source
 
+    # Section filter
+    section_options = ["All", "Combat", "Matrix", "Magic", "Gear", "Character Creation", "Riggers", "Technomancy"]
+    filter_section = st.selectbox(
+        "Filter by Section (optional)",
+        section_options,
+        index=0
+    )
+    filter_section = None if filter_section == "All" else filter_section
+
+    # Subsection filter
+    filter_subsection = st.text_input(
+        "Filter by Subsection (optional)",
+        placeholder="e.g., Hacking, Spellcasting, Initiative"
+    )
+    filter_subsection = None if filter_subsection.strip() == "" else filter_subsection
+
 # Main interface tabs
 tab1, tab2, tab3, tab4 = st.tabs(["💬 Query", "📤 Upload", "📚 Documents", "📝 Session Notes"])
 
@@ -168,62 +186,90 @@ with tab1:
         st.write("")  # Spacer
         st.write("")
         search_button = st.button("🔍 Search", type="primary", use_container_width=True)
-    
-    # Handle query
-    if search_button and query:
-        with st.spinner("Searching the shadows..."):
-            # Build filter
-            where_filter = {}
-            if filter_source:
-                where_filter["source"] = {"$contains": filter_source}
 
-            response = api_request(
-                "/query",
-                method="POST",
-                json={
-                    "question": query,
-                    "n_results": n_results,
-                    "query_type": query_type,
-                    "where_filter": where_filter,  # ← Send where_filter directly
-                    "character_role": character_role,
-                    "character_stats": character_stats,
-                    "edition": edition
+    # Handle query
+
+    if search_button and query:
+        with st.spinner("Streaming from the shadows..."):
+            try:
+                # Build where_filter for metadata filtering
+                where_filter = {}
+
+                # Role-based section filter
+                role_to_section = {
+                    "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
+                    "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Technomancy"
                 }
-            )
-            
-            if response:
-                st.session_state.query_input = ""
-                # Display answer
+
+                if filter_source:
+                    where_filter["source"] = {"$contains": filter_source}
+                if filter_section:
+                    where_filter["Section"] = filter_section
+                else:
+                    # No manual section → use role as convenience
+                    if character_role and character_role in role_to_section:
+                        where_filter["Section"] = role_to_section[character_role]
+                if filter_subsection:
+                    where_filter["Subsection"] = filter_subsection
+
+                response = requests.post(
+                    f"{API_URL}/query_stream",
+                    json={
+                        "question": query,
+                        "n_results": n_results,
+                        "query_type": query_type,
+                        "where_filter": where_filter,
+                        "character_role": character_role,
+                        "character_stats": character_stats,
+                        "edition": edition
+                    },
+                    stream=True
+                )
+                response.raise_for_status()
+
+                # Stream the answer
                 st.markdown("### 🎯 Answer")
-                st.markdown(response['answer'])
-                
-                # Display sources
-                if response.get('sources'):
+                message_placeholder = st.empty()
+                full_response = ""
+                metadata = None
+
+                for chunk in response.iter_content(chunk_size=16, decode_unicode=True):
+                    if chunk:
+                        # Check if this chunk contains metadata
+                        if "__METADATA__" in chunk:
+                            parts = chunk.split("__METADATA__")
+                            # Add text before metadata
+                            if parts[0]:
+                                full_response += parts[0]
+                            # Parse metadata
+                            try:
+                                metadata = json.loads(parts[1])
+                            except Exception as e:
+                                logger.error(f"Metadata parse failed: {e}")
+                            break  # Metadata is last
+                        else:
+                            full_response += chunk
+                            message_placeholder.markdown(full_response + "▌")
+
+                # Final update without cursor
+                message_placeholder.markdown(full_response)
+
+                # Display sources from metadata
+                if metadata and metadata.get('sources'):
                     st.markdown("### 📖 Sources")
-                    cols = st.columns(min(len(response['sources']), 3))
-                    for i, source in enumerate(response['sources']):
+                    cols = st.columns(min(len(metadata['sources']), 3))
+                    for i, source in enumerate(metadata['sources']):
                         with cols[i % 3]:
-                            # Extract filename from path
                             source_name = Path(source).name
                             st.markdown(f"""
                             <div class="source-box">
-                                📄 <strong>{source_name}</strong><br>
-                                <small>{source}</small>
+                                📄 <strong>{source_name}</strong>
                             </div>
                             """, unsafe_allow_html=True)
-                
-                # Show retrieved chunks (expandable)
-                with st.expander("🔍 View Retrieved Context Chunks"):
-                    for i, chunk in enumerate(response.get('chunks', [])):
-                        distance = response.get('distances', [])[i] if i < len(response.get('distances', [])) else 0
-                        st.markdown(f"""
-                        <div class="chunk-box">
-                            <strong>Chunk {i+1}</strong> (Similarity: {1-distance:.2%})<br>
-                            <small>{chunk[:500]}{'...' if len(chunk) > 500 else ''}</small>
-                        </div>
-                        """, unsafe_allow_html=True)
-            else:
-                st.error("Search failed. Edit and try again.")
+
+            except Exception as e:
+                st.error(f"Stream failed: {e}")
+                # Optionally fall back to non-streaming
     
     # Example queries
     st.markdown("---")

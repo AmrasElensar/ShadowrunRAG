@@ -2,6 +2,7 @@
 import ollama
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 import shutil
@@ -11,6 +12,7 @@ from .indexer import IncrementalIndexer
 from .retriever import Retriever
 from .watcher import PDFWatcher
 from tools.pdf_processor import PDFProcessor
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -119,6 +121,65 @@ async def query(request: QueryRequest):
         logger.error(f"Query error: {e}", exc_info=True)
         raise HTTPException(500, str(e))
 
+@app.post("/query_stream")
+async def query_stream(request: QueryRequest):
+    """Stream the answer and include full metadata at the end."""
+    try:
+        # Build filter
+        where_filter = {}
+        if request.filter_source:
+            where_filter["source"] = {"$contains": request.filter_source}
+        if request.filter_section:
+            where_filter["Section"] = request.filter_section
+        if request.filter_subsection:
+            where_filter["Subsection"] = request.filter_subsection
+
+        role_to_section = {
+            "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
+            "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Technomancy"
+        }
+        if request.character_role and request.character_role in role_to_section:
+            where_filter["Section"] = role_to_section[request.character_role]
+
+        def generate():
+            try:
+                # Run full RAG pipeline (only once)
+                result = retriever.query(
+                    question=request.question,
+                    n_results=request.n_results,
+                    query_type=request.query_type,
+                    where_filter=where_filter,
+                    character_role=request.character_role,
+                    character_stats=request.character_stats,
+                    edition=request.edition
+                )
+
+                # Stream the answer token by token
+                answer = result["answer"]
+                for i in range(len(answer)):
+                    yield answer[i]
+                    # Optional: add small delay for smoother UX
+                    # time.sleep(0.01)
+
+                # After answer, send metadata as a final JSON chunk
+                metadata_packet = {
+                    "sources": result["sources"],
+                    "chunks": result["chunks"],
+                    "distances": result["distances"],
+                    "metadatas": result["metadatas"],
+                    "done": True
+                }
+                yield f"\n__METADATA__{json.dumps(metadata_packet)}__METADATA__"
+
+            except Exception as e:
+                yield f"Error: {str(e)}"
+
+        return StreamingResponse(generate(), media_type="text/plain")
+
+    except Exception as e:
+        logger.error(f"Stream error: {e}")
+        raise HTTPException(500, str(e))
+
 @app.post("/index")
 async def index_documents(request: IndexRequest):
     """Manually trigger indexing."""
@@ -149,18 +210,36 @@ async def list_documents():
         logger.error(f"Error listing documents: {e}")
         return {"documents": []}
 
+
 @app.get("/models")
 async def list_models():
     """List available Ollama models."""
     try:
         import ollama
-        models = ollama.list()
-        return {
-            "models": [model['name'] for model in models.get('models', [])]
-        }
+        models_response = ollama.list()
+
+        # Debug: Log the actual response structure
+        logger.info(f"Ollama models response: {models_response}")
+
+        models = []
+        for model in models_response.get('models', []):
+            # Try different possible key names for model name
+            model_name = (
+                    model.get('name') or
+                    model.get('model') or
+                    model.get('id') or
+                    str(model)  # fallback to string representation
+            )
+            if model_name:
+                models.append(model_name)
+
+        return {"models": models}
+
     except Exception as e:
         logger.error(f"Error listing models: {e}")
-        return {"models": ["llama3", "mistral", "codellama"]}
+        # Include the actual error details for debugging
+        logger.error(f"Error type: {type(e).__name__}")
+        return {"models": ["llama3", "mistral", "codellama"], "error": str(e)}
 
 @app.get("/status")
 async def status():

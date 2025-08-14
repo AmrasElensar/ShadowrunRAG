@@ -1,37 +1,30 @@
 services:
   ollama:
     image: ollama/ollama:latest
-    container_name: shadowrun-ollama
     runtime: nvidia
+    container_name: shadowrun-ollama
+    restart: unless-stopped
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-      - ./ollama-config:/root/.ollama/config
     environment:
-      - NVIDIA_VISIBLE_DEVICES=0
-      - CUDA_VISIBLE_DEVICES=0
-      - OLLAMA_KEEP_ALIVE=1
-      - OLLAMA_NUM_GPU=99  # Use all GPU layers
+      - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_HOST=0.0.0.0
-      # RTX 4090 Mobile optimizations
-      - OLLAMA_MAX_LOADED_MODELS=1
-      - OLLAMA_NUM_PARALLEL=2
-      - OLLAMA_GPU_OVERHEAD=1073741824  # 1GB overhead
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - OLLAMA_KEEP_ALIVE=1
+      - OLLAMA_MAX_LOADED_MODELS=1       # Only one model in VRAM
+      - OLLAMA_NUM_PARALLEL=2            # Handle 2 concurrent requests
+      - OLLAMA_DEBUG=1
+      - OLLAMA_LOG_LEVEL=debug
+      # - OLLAMA_GPU_OVERHEAD=536870912  # Optional: 512MB overhead
     networks:
       - shadowrun-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "true"]
+      interval: 10s
+      timeout: 3s
       retries: 3
+      start_period: 60s  # Give Ollama 60s to fully load
 
   backend:
     build:
@@ -41,7 +34,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
+      - ./data:/app/data:rw
       - ./backend:/app/backend
       - ./tools:/app/tools
     environment:
@@ -49,7 +42,7 @@ services:
       - EMBEDDING_MODEL=nomic-embed-text
       - LLM_MODEL=mixtral:8x7b-instruct-v0.1-q4_K_M
       # Model optimization
-      - MODEL_NUM_GPU=99
+      - MODEL_NUM_GPU=-1
       - MODEL_NUM_THREAD=12
       - MODEL_TEMPERATURE=0.5
       - MODEL_TOP_K=40
@@ -67,7 +60,12 @@ services:
         condition: service_healthy
     networks:
       - shadowrun-net
-    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
 
   frontend:
     build:
@@ -78,7 +76,7 @@ services:
       - "8501:8501"
     volumes:
       - ./frontend:/app/frontend
-      - ./data:/app/data
+      - ./data:/app/data:rw
     environment:
       - API_URL=http://backend:8000
       - STREAMLIT_SERVER_PORT=8501
@@ -86,7 +84,8 @@ services:
       - STREAMLIT_SERVER_ENABLE_CORS=false
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - shadowrun-net
     restart: unless-stopped

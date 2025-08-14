@@ -1,4 +1,4 @@
-/data/chroma_db/a952c7fd-1524-4bb5-ac01-803be7d2e495/
-/data/chroma_db/chroma.sqlite3
-/data/chroma_db/indexed_files.json
-
+/data/raw_pdfs/
+/data/processed_markdown/
+/data/chroma_db/
+/data/

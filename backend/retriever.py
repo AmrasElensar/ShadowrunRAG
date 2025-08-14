@@ -105,35 +105,37 @@ class Retriever:
             return {"documents": [], "metadatas": [], "distances": []}
 
     def generate_answer(
-        self,
-        prompt: str,  # ← Now receives fully rendered prompt
-        query_type: str = "general",
-        stream: bool = False,
-        custom_options: dict = None
+            self,
+            prompt: str,
+            query_type: str = "general",
+            stream: bool = False,
+            custom_options: dict = None
     ) -> str:
-        """Generate answer using a pre-rendered prompt."""
         model_options = self.get_model_options(query_type)
         if custom_options:
             model_options.update(custom_options)
 
         try:
             if stream:
-                return ollama.generate(
+                # Return generator
+                response = ollama.generate(
                     model=self.llm_model,
                     prompt=prompt,
                     stream=True,
                     options=model_options
                 )
+                for chunk in response:
+                    yield chunk['response']  # ← yields one token at a time
             else:
                 response = ollama.generate(
                     model=self.llm_model,
                     prompt=prompt,
                     options=model_options
                 )
-                return response['response']
+                yield response['response']  # ← still return a generator for consistency
         except Exception as e:
             logger.error(f"Generation error: {e}")
-            return f"Error generating response: {str(e)}"
+            yield f"Error generating response: {str(e)}"
 
     def query(
         self,
@@ -208,3 +210,64 @@ class Retriever:
             "distances": search_results['distances'],
             "metadatas": search_results['metadatas']
         }
+
+    def query_stream(
+        self,
+        question: str,
+        n_results: int = 5,
+        query_type: str = "general",
+        where_filter: Optional[Dict] = None,
+        character_role: Optional[str] = None,
+        character_stats: Optional[str] = None,
+        edition: Optional[str] = None
+    ):
+        """Stream the answer token by token."""
+        # Search
+        search_results = self.search(question, n_results, where_filter)
+
+        if not search_results['documents']:
+            yield "No relevant information found in the indexed documents."
+            return
+
+        # Build context with provenance
+        context_parts = []
+        for doc, meta in zip(search_results['documents'], search_results['metadatas']):
+            source = "Unknown"
+            if meta and isinstance(meta, dict):
+                src = meta.get('source')
+                if src:
+                    try:
+                        source = Path(src).name
+                    except Exception:
+                        source = str(src)
+            section = meta.get('Section', 'General')
+            subsection = meta.get('Subsection', 'General')
+            context_parts.append(f"[Section: {section} → {subsection} | Source: {source}]\n{doc}")
+
+        context = "\n\n---\n\n".join(context_parts)
+
+        # Build prompt
+        if PROMPT_AVAILABLE:
+            prompt_template = get_prompt(
+                query_type=query_type,
+                character_role=character_role,
+                character_stats=character_stats,
+                edition=edition
+            )
+        else:
+            prompt_template = get_prompt()
+
+        try:
+            prompt = prompt_template.format(context=context, question=question)
+        except Exception as e:
+            logger.warning(f"Prompt formatting failed: {e}")
+            prompt = f"{prompt_template}\n\nContext:\n{context}\n\nQuestion:\n{question}"
+
+        # Stream answer
+        for token in self.generate_answer(
+            prompt=prompt,
+            query_type=query_type,
+            stream=True,
+            custom_options={"temperature": self.get_model_options(query_type)["temperature"]}
+        ):
+            yield token

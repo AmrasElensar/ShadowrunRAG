@@ -1,45 +1,56 @@
 # ===================
 # Core Dependencies
 # ===================
-fastapi==0.110.0
-uvicorn==0.27.1
-streamlit==1.31.0
-watchdog==3.0.0
+fastapi==0.115.4
+uvicorn[standard]==0.35.0
+streamlit==1.48.1
+watchdog==4.0.2
+requests==2.32.3
 
 # ===================
 # PDF & Document Processing
 # ===================
-PyMuPDF==1.24.4            # fitz - superior text/layout extraction
-pdf2image==1.16.3          # PDF to PIL images for OCR
-pytesseract==0.3.10        # OCR engine wrapper
-Pillow==11.3.0             # Image processing (required by pdf2image)
-markdown==3.5.1            # Markdown parsing
-unstructured[local-inference,pdf]==0.13.6
-unstructured[pdf]==0.13.6
-# Note: unstructured requires: libmagic, poppler, tesseract (see below)
+PyMuPDF==1.24.12           # fitz - superior text/layout extraction
+pdf2image==1.17.0          # PDF to PIL images for OCR
+pytesseract==0.3.13        # OCR engine wrapper
+Pillow>=7.1.0,<11.0.0      # Image processing - compatible with Streamlit
+markdown==3.7             # Markdown parsing
+
+# Unstructured with compatible versions
+unstructured[local-inference]==0.18.11
+unstructured[pdf]==0.18.11
 
 # ===================
 # AI/ML & RAG Stack
 # ===================
-ollama==0.2.0              # Updated API support
-chromadb==0.4.24           # Persistent client, metadata filtering
-langchain==0.1.18
-langchain-community==0.0.33
-langchain-core==0.1.45
-langchain-text-splitters==0.0.1  # Explicit for MarkdownHeaderTextSplitter
+ollama==0.5.3              # Latest stable version
+chromadb==1.0.16           # Latest stable with Pydantic 2 support
+pydantic==2.9.2           # Pydantic 2 for modern FastAPI compatibility
+pydantic-settings==2.6.1  # Required for ChromaDB BaseSettings
+
+# LangChain with latest compatible versions
+langchain==0.3.27
+langchain-community==0.3.27
+langchain-core==0.3.74           # Required by langchain 0.3.27 (>=0.3.72)
+langchain-text-splitters==0.3.9  # Required by langchain 0.3.27 (>=0.3.9)
 
 # Tokenization
-tiktoken==0.6.0
+tiktoken==0.8.0
 
 # Embedding backend (if you expand later)
-# sentence-transformers==2.2.2  # Alternative to Ollama embeddings
+# sentence-transformers==3.2.1  # Alternative to Ollama embeddings
 
 # ===================
 # Utilities
 # ===================
-python-multipart==0.0.19    # For FastAPI file uploads
-aiofiles==23.2.1           # Async file I/O
-pydantic==2.6.4            # Data validation (LangChain compatible)
-python-dotenv==1.0.0       # Env vars
-tqdm==4.66.4               # Progress bars
-numpy>=1.21.0              # Required by many ML packages
+python-multipart==0.0.20    # For FastAPI file uploads
+aiofiles==24.1.0           # Async file I/O
+python-dotenv==1.0.1       # Env vars
+tqdm==4.66.5               # Progress bars
+numpy>=1.24.0,<3.0.0      # Compatible with all ML packages
+
+# ===================
+# Additional Required Dependencies
+# ===================
+typing-extensions>=4.0.0   # Required for modern Python typing
+httpx>=0.25.0             # Required for modern HTTP clients
