@@ -1,0 +1,117 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: shadowrun-ollama
+    runtime: nvidia
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./ollama-config:/root/.ollama/config
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+      - OLLAMA_KEEP_ALIVE=1
+      - OLLAMA_NUM_GPU=99  # Use all GPU layers
+      - OLLAMA_HOST=0.0.0.0
+      # RTX 4090 Mobile optimizations
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_GPU_OVERHEAD=1073741824  # 1GB overhead
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - shadowrun-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: shadowrun-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app/backend
+      - ./tools:/app/tools
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - EMBEDDING_MODEL=nomic-embed-text
+      - LLM_MODEL=mixtral:8x7b-instruct-v0.1-q4_K_M
+      # Model optimization
+      - MODEL_NUM_GPU=99
+      - MODEL_NUM_THREAD=12
+      - MODEL_TEMPERATURE=0.5
+      - MODEL_TOP_K=40
+      - MODEL_TOP_P=0.9
+      - MODEL_REPEAT_PENALTY=1.05
+      - MODEL_NUM_CTX=16384        # ← Increased for 16K context
+      - MODEL_NUM_BATCH=512
+      # Chroma
+      - CHROMA_DB_PATH=/app/data/chroma_db
+      - COLLECTION_NAME=shadowrun_docs
+      - CHUNK_SIZE=500
+      - CHUNK_OVERLAP=50
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - shadowrun-net
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: shadowrun-frontend
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./frontend:/app/frontend
+      - ./data:/app/data
+    environment:
+      - API_URL=http://backend:8000
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_ENABLE_CORS=false
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    depends_on:
+      - backend
+    networks:
+      - shadowrun-net
+    restart: unless-stopped
+
+  # Optional: Nginx for nice URLs
+  nginx:
+    image: nginx:alpine
+    container_name: shadowrun-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - shadowrun-net
+    restart: unless-stopped
+
+networks:
+  shadowrun-net:
+    driver: bridge
+
+volumes:
+  ollama_data:
+    driver: local
