@@ -10,18 +10,22 @@ from chromadb.config import Settings
 import ollama
 from tqdm import tqdm
 import logging
-import tiktoken
-# -----------------------------
-# Optional: For better chunking
+
+# Check for optional dependencies
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+    logging.warning("tiktoken not available - using word-based chunking")
+
 try:
     from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-    from langchain_community.embeddings import OllamaEmbeddings  # Optional: if using langchain
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False
     logging.warning("LangChain not installed. Install with: pip install langchain langchain-community")
 
-# -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,7 @@ class IncrementalIndexer:
         chroma_path: str = "data/chroma_db",
         collection_name: str = "shadowrun_docs",
         embedding_model: str = "nomic-embed-text",
-        chunk_size: int = 512,           # now in tokens
+        chunk_size: int = 512,           # tokens if tiktoken available, else words
         chunk_overlap: int = 100,
         use_semantic_splitting: bool = True
     ):
@@ -60,13 +64,14 @@ class IncrementalIndexer:
         self.index_file = self.chroma_path / "indexed_files.json"
         self.indexed_files = self._load_index_metadata()
         
-        # Token counter (simple approximation if tiktoken not available)
-        try:
-            import tiktoken
-            self._tokenize = lambda text: tiktoken.get_encoding("cl100k_base").encode(text)
-        except ImportError:
-            logger.warning("tiktoken not installed. Falling back to rough token estimation.")
-            self._tokenize = lambda text: text.split()  # rough estimate
+        # Set up tokenizer
+        if TIKTOKEN_AVAILABLE:
+            self.encoder = tiktoken.get_encoding("cl100k_base")
+            self._count_tokens = lambda text: len(self.encoder.encode(text))
+            logger.info("Using tiktoken for accurate token counting")
+        else:
+            self._count_tokens = lambda text: len(text.split())  # rough word count
+            logger.info("Using word-based token approximation")
 
     def _load_index_metadata(self) -> Dict:
         """Load metadata about previously indexed files."""
@@ -83,14 +88,14 @@ class IncrementalIndexer:
         return hashlib.md5(file_path.read_bytes()).hexdigest()
 
     def _chunk_text_semantic(self, text: str, source: str) -> List[Dict]:
-        """
-        Split text using Markdown headers and token-aware fallback.
-        Ideal for unstructured-processed Markdown files.
-        """
+        """Split text using Markdown headers with consistent token-based sizing."""
+        if not self.use_semantic_splitting:
+            return self._chunk_text_simple(text, source)
+            
         headers_to_split_on = [
-            ("#", "Section"),  # e.g., "Combat"
-            ("##", "Subsection"),  # e.g., "Ranged Attacks"
-            ("###", "Subsubsection"),  # e.g., "Recoil"
+            ("#", "Section"),
+            ("##", "Subsection"),
+            ("###", "Subsubsection"),
         ]
 
         # First: split by headers
@@ -98,31 +103,37 @@ class IncrementalIndexer:
         try:
             header_chunks = markdown_splitter.split_text(text)
         except Exception as e:
-            logger.warning(f"Header splitting failed: {e}. Falling back to recursive.")
-            header_chunks = [type('Chunk', (), {'page_content': text, 'metadata': {}})]
+            logger.warning(f"Header splitting failed: {e}. Falling back to simple chunking.")
+            return self._chunk_text_simple(text, source)
 
-        # Second: split large chunks by token count
+        # Second: split large chunks by token/word count
         final_chunks = []
-        try:
-            encoder = tiktoken.get_encoding("cl100k_base")
+        
+        if TIKTOKEN_AVAILABLE:
+            # Use tiktoken-aware splitter
             splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
                 chunk_size=self.chunk_size,
                 chunk_overlap=self.chunk_overlap,
                 encoding_name="cl100k_base"
             )
-        except:
-            logger.warning("tiktoken unavailable. Using fallback splitter.")
+        else:
+            # Use character-based splitter with word approximation
+            # Rough conversion: 1 token ≈ 4 characters
+            char_chunk_size = self.chunk_size * 4
+            char_overlap = self.chunk_overlap * 4
             splitter = RecursiveCharacterTextSplitter(
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.chunk_overlap,
+                chunk_size=char_chunk_size,
+                chunk_overlap=char_overlap,
                 length_function=len
             )
 
         for chunk in header_chunks:
             content = chunk.page_content
             metadata = chunk.metadata
+            token_count = self._count_tokens(content)
 
-            if len(encoder.encode(content)) > self.chunk_size:
+            if token_count > self.chunk_size:
+                # Split further
                 split_docs = splitter.split_text(content)
                 for i, doc in enumerate(split_docs):
                     final_chunks.append({
@@ -132,7 +143,7 @@ class IncrementalIndexer:
                             **metadata,
                             "source": source,
                             "chunk_part": i,
-                            "token_count": len(encoder.encode(doc))
+                            "token_count": self._count_tokens(doc)
                         }
                     })
             else:
@@ -142,27 +153,47 @@ class IncrementalIndexer:
                     "metadata": {
                         **metadata,
                         "source": source,
-                        "token_count": len(encoder.encode(content))
+                        "token_count": token_count
                     }
                 })
 
         return final_chunks
 
     def _chunk_text_simple(self, text: str, source: str) -> List[Dict]:
-        """Simple word-based chunking (fallback)."""
-        words = text.split()
-        chunks = []
-        for i in range(0, len(words), self.chunk_size - self.chunk_overlap):
-            chunk_words = words[i:i + self.chunk_size]
-            chunk_text = " ".join(chunk_words)
-            chunks.append({
-                "text": chunk_text,
-                "source": source,
-                "metadata": {
+        """Simple word/token-based chunking fallback."""
+        if TIKTOKEN_AVAILABLE:
+            # Token-based chunking
+            tokens = self.encoder.encode(text)
+            chunks = []
+            
+            for i in range(0, len(tokens), self.chunk_size - self.chunk_overlap):
+                chunk_tokens = tokens[i:i + self.chunk_size]
+                chunk_text = self.encoder.decode(chunk_tokens)
+                chunks.append({
+                    "text": chunk_text,
                     "source": source,
-                    "word_count": len(chunk_words)
-                }
-            })
+                    "metadata": {
+                        "source": source,
+                        "token_count": len(chunk_tokens)
+                    }
+                })
+        else:
+            # Word-based chunking
+            words = text.split()
+            chunks = []
+            
+            for i in range(0, len(words), self.chunk_size - self.chunk_overlap):
+                chunk_words = words[i:i + self.chunk_size]
+                chunk_text = " ".join(chunk_words)
+                chunks.append({
+                    "text": chunk_text,
+                    "source": source,
+                    "metadata": {
+                        "source": source,
+                        "word_count": len(chunk_words)
+                    }
+                })
+        
         return chunks
 
     def _get_embeddings(self, texts: List[str]) -> List[List[float]]:

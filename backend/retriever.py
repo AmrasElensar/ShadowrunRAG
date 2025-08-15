@@ -80,20 +80,26 @@ class Retriever:
         return options
 
     def search(
-        self,
-        question: str,
-        n_results: int = 5,
-        where_filter: Optional[Dict] = None
+            self,
+            question: str,
+            n_results: int = 5,
+            where_filter: Optional[Dict] = None
     ) -> Dict:
         try:
             response = ollama.embeddings(model=self.embedding_model, prompt=question)
             query_embedding = response['embedding']
 
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results,
-                where=where_filter
-            )
+            # Fix: Only pass where filter if it's not empty
+            query_params = {
+                "query_embeddings": [query_embedding],
+                "n_results": n_results
+            }
+
+            # Only add where filter if it has actual conditions
+            if where_filter and len(where_filter) > 0:
+                query_params["where"] = where_filter
+
+            results = self.collection.query(**query_params)
 
             return {
                 "documents": results['documents'][0] if results['documents'] else [],

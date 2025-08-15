@@ -79,38 +79,40 @@ async def upload_pdf(
         "message": "PDF uploaded and queued for processing"
     }
 
+
 @app.post("/query")
 async def query(request: QueryRequest):
     """Query the RAG system with full context."""
     try:
-        # Build metadata filter
+        # Build metadata filter - FIXED: Only add non-empty conditions
         where_filter = {}
-        if request.filter_source:
+
+        if request.filter_source and request.filter_source.strip():
             where_filter["source"] = {"$contains": request.filter_source}
-        if request.filter_section:
+        if request.filter_section and request.filter_section.strip():
             where_filter["Section"] = request.filter_section
-        if request.filter_subsection:
+        if request.filter_subsection and request.filter_subsection.strip():
             where_filter["Subsection"] = request.filter_subsection
 
-        # Role-based fallback
+        # Role-based fallback (only if no manual section)
         role_to_section = {
-            "decker": "Matrix",
-            "hacker": "Matrix",
-            "mage": "Magic",
-            "adept": "Magic",
-            "street_samurai": "Combat",
-            "rigger": "Riggers",
-            "technomancer": "Technomancy"
+            "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
+            "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Technomancy"
         }
-        if request.character_role and request.character_role in role_to_section:
+        if (request.character_role and
+                request.character_role in role_to_section and
+                "Section" not in where_filter):
             where_filter["Section"] = role_to_section[request.character_role]
+
+        # Pass None if empty dict
+        final_filter = where_filter if where_filter else None
 
         # Query retriever
         results = retriever.query(
             question=request.question,
             n_results=request.n_results,
             query_type=request.query_type,
-            where_filter=where_filter,
+            where_filter=final_filter,  # Fixed: Use final_filter
             character_role=request.character_role,
             character_stats=request.character_stats,
             edition=request.edition
@@ -121,25 +123,33 @@ async def query(request: QueryRequest):
         logger.error(f"Query error: {e}", exc_info=True)
         raise HTTPException(500, str(e))
 
+
 @app.post("/query_stream")
 async def query_stream(request: QueryRequest):
     """Stream the answer and include full metadata at the end."""
     try:
-        # Build filter
+        # Build filter - FIXED: Only add non-empty conditions
         where_filter = {}
-        if request.filter_source:
+
+        if request.filter_source and request.filter_source.strip():
             where_filter["source"] = {"$contains": request.filter_source}
-        if request.filter_section:
+        if request.filter_section and request.filter_section.strip():
             where_filter["Section"] = request.filter_section
-        if request.filter_subsection:
+        if request.filter_subsection and request.filter_subsection.strip():
             where_filter["Subsection"] = request.filter_subsection
 
+        # Role-based section filter (only if no manual section set)
         role_to_section = {
             "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
             "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Technomancy"
         }
-        if request.character_role and request.character_role in role_to_section:
+        if (request.character_role and
+                request.character_role in role_to_section and
+                "Section" not in where_filter):  # Don't override manual section
             where_filter["Section"] = role_to_section[request.character_role]
+
+        # Pass None if empty dict (ChromaDB requirement)
+        final_filter = where_filter if where_filter else None
 
         def generate():
             try:
@@ -148,7 +158,7 @@ async def query_stream(request: QueryRequest):
                     question=request.question,
                     n_results=request.n_results,
                     query_type=request.query_type,
-                    where_filter=where_filter,
+                    where_filter=final_filter,  # Fixed: Use final_filter
                     character_role=request.character_role,
                     character_stats=request.character_stats,
                     edition=request.edition
@@ -158,8 +168,6 @@ async def query_stream(request: QueryRequest):
                 answer = result["answer"]
                 for i in range(len(answer)):
                     yield answer[i]
-                    # Optional: add small delay for smoother UX
-                    # time.sleep(0.01)
 
                 # After answer, send metadata as a final JSON chunk
                 metadata_packet = {
@@ -169,9 +177,11 @@ async def query_stream(request: QueryRequest):
                     "metadatas": result["metadatas"],
                     "done": True
                 }
-                yield f"\n__METADATA__{json.dumps(metadata_packet)}__METADATA__"
+                # Fix: Ensure clean JSON with proper delimiters
+                yield f"\n__METADATA__{json.dumps(metadata_packet, ensure_ascii=False)}__METADATA__\n"
 
             except Exception as e:
+                logger.error(f"Generation error: {e}")
                 yield f"Error: {str(e)}"
 
         return StreamingResponse(generate(), media_type="text/plain")
