@@ -1,4 +1,4 @@
-"""Retrieval and answer generation with Ollama and metadata-aware filtering."""
+"""Fixed retriever.py - separate streaming and non-streaming methods."""
 
 import ollama
 from typing import List, Dict, Optional
@@ -108,31 +108,47 @@ class Retriever:
             self,
             prompt: str,
             query_type: str = "general",
-            stream: bool = False,
             custom_options: dict = None
     ) -> str:
+        """Generate complete answer as string (non-streaming)."""
         model_options = self.get_model_options(query_type)
         if custom_options:
             model_options.update(custom_options)
 
         try:
-            if stream:
-                # Return generator
-                response = ollama.generate(
-                    model=self.llm_model,
-                    prompt=prompt,
-                    stream=True,
-                    options=model_options
-                )
-                for chunk in response:
-                    yield chunk['response']  # ← yields one token at a time
-            else:
-                response = ollama.generate(
-                    model=self.llm_model,
-                    prompt=prompt,
-                    options=model_options
-                )
-                yield response['response']  # ← still return a generator for consistency
+            response = ollama.generate(
+                model=self.llm_model,
+                prompt=prompt,
+                stream=False,
+                options=model_options
+            )
+            return response['response']
+
+        except Exception as e:
+            logger.error(f"Generation error: {e}")
+            return f"Error generating response: {str(e)}"
+
+    def generate_answer_stream(
+            self,
+            prompt: str,
+            query_type: str = "general",
+            custom_options: dict = None
+    ):
+        """Generate answer as streaming generator."""
+        model_options = self.get_model_options(query_type)
+        if custom_options:
+            model_options.update(custom_options)
+
+        try:
+            response = ollama.generate(
+                model=self.llm_model,
+                prompt=prompt,
+                stream=True,
+                options=model_options
+            )
+            for chunk in response:
+                yield chunk['response']
+
         except Exception as e:
             logger.error(f"Generation error: {e}")
             yield f"Error generating response: {str(e)}"
@@ -147,7 +163,7 @@ class Retriever:
         character_stats: Optional[str] = None,
         edition: Optional[str] = None
     ) -> Dict:
-        """Complete RAG pipeline: search + generate."""
+        """Complete RAG pipeline: search + generate (NON-STREAMING)."""
         search_results = self.search(question, n_results, where_filter)
 
         if not search_results['documents']:
@@ -193,7 +209,7 @@ class Retriever:
             logger.warning(f"Prompt formatting failed: {e}")
             prompt = f"{prompt_template}\n\nContext:\n{context}\n\nQuestion:\n{question}"
 
-        # Generate answer
+        # Generate answer (NON-STREAMING)
         answer = self.generate_answer(
             prompt=prompt,
             query_type=query_type,
@@ -264,10 +280,9 @@ class Retriever:
             prompt = f"{prompt_template}\n\nContext:\n{context}\n\nQuestion:\n{question}"
 
         # Stream answer
-        for token in self.generate_answer(
+        for token in self.generate_answer_stream(
             prompt=prompt,
             query_type=query_type,
-            stream=True,
             custom_options={"temperature": self.get_model_options(query_type)["temperature"]}
         ):
             yield token

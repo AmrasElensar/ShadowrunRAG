@@ -12,11 +12,12 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_HOST=0.0.0.0
       - OLLAMA_KEEP_ALIVE=1
-      - OLLAMA_MAX_LOADED_MODELS=1       # Only one model in VRAM
-      - OLLAMA_NUM_PARALLEL=2            # Handle 2 concurrent requests
-      - OLLAMA_DEBUG=1
-      - OLLAMA_LOG_LEVEL=debug
+      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_NUM_GPU=1            # ← Ensure GPU is enabled
+      - OLLAMA_FLASH_ATTENTION=1    # ← Memory optimization
       # - OLLAMA_GPU_OVERHEAD=536870912  # Optional: 512MB overhead
+      
     networks:
       - shadowrun-net
     healthcheck:
@@ -48,7 +49,7 @@ services:
       - MODEL_TOP_K=40
       - MODEL_TOP_P=0.9
       - MODEL_REPEAT_PENALTY=1.05
-      - MODEL_NUM_CTX=16384        # ← Increased for 16K context
+      - MODEL_NUM_CTX=8192
       - MODEL_NUM_BATCH=512
       # Chroma
       - CHROMA_DB_PATH=/app/data/chroma_db
