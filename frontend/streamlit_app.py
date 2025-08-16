@@ -359,7 +359,11 @@ with tab2:
         if action['type'] == 'clear_all':
             st.session_state.ready_files = []
             st.session_state.uploader_key += 1
+
         elif action['type'] == 'process_all':
+            # Upload all files
+            upload_errors = []
+
             for file_info in st.session_state.ready_files:
                 st.session_state.processing_files[file_info['id']] = {
                     'name': file_info['name'],
@@ -367,16 +371,40 @@ with tab2:
                     'file': file_info['file'],
                     'stage': 'uploading'
                 }
-            st.session_state.ready_files = []
-            st.session_state.uploader_key += 1
+
+                # ACTUALLY UPLOAD EACH FILE
+                try:
+                    files = {"file": (file_info['name'], file_info['file'].getvalue(), "application/pdf")}
+                    response = requests.post(f"{API_URL}/upload", files=files)
+
+                    if response.status_code == 200:
+                        st.session_state.processing_files[file_info['id']]['stage'] = 'processing'
+                        st.success(f"✅ {file_info['name']} uploaded successfully!")
+                    else:
+                        upload_errors.append(file_info)
+                        st.error(f"❌ Upload failed for {file_info['name']}: {response.text}")
+                        del st.session_state.processing_files[file_info['id']]
+
+                except Exception as e:
+                    upload_errors.append(file_info)
+                    st.error(f"❌ Upload error for {file_info['name']}: {str(e)}")
+                    del st.session_state.processing_files[file_info['id']]
+
+            # Keep failed uploads in ready_files, remove successful ones
+            st.session_state.ready_files = upload_errors
+            if not st.session_state.ready_files:
+                st.session_state.uploader_key += 1
+
         elif action['type'] == 'remove_file':
             file_id = action['file_id']
             st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
             if not st.session_state.ready_files:
                 st.session_state.uploader_key += 1
+
         elif action['type'] == 'process_file':
             file_id = action['file_id']
             file_info = next((f for f in st.session_state.ready_files if f['id'] == file_id), None)
+
             if file_info:
                 st.session_state.processing_files[file_id] = {
                     'name': file_info['name'],
@@ -384,9 +412,28 @@ with tab2:
                     'file': file_info['file'],
                     'stage': 'uploading'
                 }
-                st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
-                if not st.session_state.ready_files:
-                    st.session_state.uploader_key += 1
+
+                # ACTUALLY UPLOAD THE INDIVIDUAL FILE
+                try:
+                    files = {"file": (file_info['name'], file_info['file'].getvalue(), "application/pdf")}
+                    response = requests.post(f"{API_URL}/upload", files=files)
+
+                    if response.status_code == 200:
+                        st.session_state.processing_files[file_id]['stage'] = 'processing'
+                        st.success(f"✅ {file_info['name']} uploaded successfully!")
+                        # Remove from ready files
+                        st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
+                        if not st.session_state.ready_files:
+                            st.session_state.uploader_key += 1
+                    else:
+                        st.error(f"❌ Upload failed: {response.text}")
+                        # Don't move to processing on failure
+                        del st.session_state.processing_files[file_id]
+
+                except Exception as e:
+                    st.error(f"❌ Upload error: {str(e)}")
+                    # Don't move to processing on error
+                    del st.session_state.processing_files[file_id]
 
         del st.session_state.action
         st.rerun()  # Single rerun after all actions
