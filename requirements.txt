@@ -11,7 +11,7 @@ requests==2.32.3
 # WebSocket Support
 # ===================
 websocket-client==1.6.4        # For Streamlit WebSocket client
-python-websockets==12.0        # For FastAPI WebSocket server (included in uvicorn[standard] but explicit)
+# Note: FastAPI WebSocket support is included in uvicorn[standard]
 
 # ===================
 # PDF & Document Processing
