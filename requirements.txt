@@ -8,6 +8,12 @@ watchdog==4.0.2
 requests==2.32.3
 
 # ===================
+# WebSocket Support
+# ===================
+websocket-client==1.6.4        # For Streamlit WebSocket client
+python-websockets==12.0        # For FastAPI WebSocket server (included in uvicorn[standard] but explicit)
+
+# ===================
 # PDF & Document Processing
 # ===================
 PyMuPDF==1.24.12           # fitz - superior text/layout extraction

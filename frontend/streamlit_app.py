@@ -1,33 +1,15 @@
-"""Streamlit web UI for Shadowrun RAG system."""
-#test comment
+"""Streamlit web UI for Shadowrun RAG system with WebSocket progress tracking."""
 import os
+import time
+import threading
+import json
+from datetime import datetime
 
 import streamlit as st
 import requests
 from pathlib import Path
-import json
 import logging
-
-@st.cache_data(ttl=30)  # Cache for 30 seconds
-def get_available_models():
-    """Fetch available models with caching."""
-    try:
-        response = api_request("/models", timeout=5)  # Add timeout
-        return response.get("models", ["llama3"]) if response else ["llama3"]
-    except Exception as e:
-        logger.warning(f"Failed to fetch models: {e}")
-        return []  # Fallback
-
-@st.cache_data(ttl=30)  # Cache for 30 seconds
-def get_available_documents():
-    """Fetch available documents with caching."""
-    try:
-        response = api_request("/documents", timeout=5)  # Add timeout
-        return response.get("documents", []) if response else []
-    except Exception as e:
-        logger.warning(f"Failed to fetch documents: {e}")
-        return []  # Fallback
-
+import websocket
 
 # API configuration
 API_URL = os.getenv("API_URL", "http://localhost:8000")
@@ -44,6 +26,10 @@ st.set_page_config(
 # Initialize session state
 if 'query_input' not in st.session_state:
     st.session_state.query_input = ""
+if 'job_progress' not in st.session_state:
+    st.session_state.job_progress = {}
+if 'ws_connected' not in st.session_state:
+    st.session_state.ws_connected = False
 
 # Custom CSS
 st.markdown("""
@@ -93,8 +79,86 @@ st.markdown("""
 .stMarkdown {
     color: var(--text-color);
 }
+
+.progress-stage {
+    font-size: 0.9em;
+    color: #666;
+    margin-bottom: 10px;
+}
 </style>
 """, unsafe_allow_html=True)
+
+# WebSocket functions
+def on_progress_message(ws, message):
+    """Handle incoming WebSocket progress messages."""
+    try:
+        data = json.loads(message)
+        job_id = data['job_id']
+        st.session_state.job_progress[job_id] = data
+        logger.info(f"Progress update: {job_id} - {data['stage']} ({data['progress']}%)")
+    except Exception as e:
+        logger.error(f"Progress message error: {e}")
+
+def on_ws_error(ws, error):
+    logger.error(f"WebSocket error: {error}")
+    st.session_state.ws_connected = False
+
+def on_ws_close(ws, close_status_code, close_msg):
+    logger.info("WebSocket connection closed")
+    st.session_state.ws_connected = False
+
+def connect_progress_websocket():
+    """Connect to the progress WebSocket."""
+    if st.session_state.ws_connected:
+        return
+
+    try:
+        # Convert HTTP URL to WebSocket URL
+        ws_url = API_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/progress'
+        logger.info(f"Connecting to WebSocket: {ws_url}")
+
+        ws = websocket.WebSocketApp(
+            ws_url,
+            on_message=on_progress_message,
+            on_error=on_ws_error,
+            on_close=on_ws_close
+        )
+
+        def run_websocket():
+            ws.run_forever()
+
+        # Run WebSocket in background thread
+        ws_thread = threading.Thread(target=run_websocket, daemon=True)
+        ws_thread.start()
+        st.session_state.ws_connected = True
+        logger.info("WebSocket connection started")
+
+    except Exception as e:
+        logger.error(f"Failed to connect WebSocket: {e}")
+
+# Auto-connect WebSocket on app start
+if not st.session_state.ws_connected:
+    connect_progress_websocket()
+
+@st.cache_data(ttl=30)  # Cache for 30 seconds
+def get_available_models():
+    """Fetch available models with caching."""
+    try:
+        response = api_request("/models", timeout=5)  # Add timeout
+        return response.get("models", ["llama3"]) if response else ["llama3"]
+    except Exception as e:
+        logger.warning(f"Failed to fetch models: {e}")
+        return ["llama3", "mixtral", "codellama"]  # Fallback
+
+@st.cache_data(ttl=30)  # Cache for 30 seconds
+def get_available_documents():
+    """Fetch available documents with caching."""
+    try:
+        response = api_request("/documents", timeout=5)  # Add timeout
+        return response.get("documents", []) if response else []
+    except Exception as e:
+        logger.warning(f"Failed to fetch documents: {e}")
+        return []  # Fallback
 
 def api_request(endpoint: str, method: str = "GET", timeout: int = 10, **kwargs):
     """Make API request with error handling and timeout."""
@@ -189,7 +253,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["💬 Query", "📤 Upload", "📚 Documents",
 
 with tab1:
     st.header("Ask a Question")
-    
+
     # Query input
     col1, col2 = st.columns([5, 1])
     with col1:
@@ -200,14 +264,13 @@ with tab1:
             placeholder="e.g., 'How do recoil penalties work in Shadowrun 5e?' or 'What happened in our last session?'",
             height=100
         )
-    
+
     with col2:
         st.write("")  # Spacer
         st.write("")
         search_button = st.button("🔍 Search", type="primary", use_container_width=True)
 
     # Handle query
-
     if search_button and query:
         with st.spinner("Streaming from the shadows..."):
             try:
@@ -241,7 +304,7 @@ with tab1:
                         "character_role": character_role,
                         "character_stats": character_stats,
                         "edition": edition,
-                        "model": selected_model  # ADD THIS LINE
+                        "model": selected_model
                     },
                     stream=True
                 )
@@ -264,16 +327,16 @@ with tab1:
                             if parts[0]:
                                 full_response += parts[0]
                                 message_placeholder.markdown(full_response + "▌")
-                            
+
                             collecting_metadata = True
                             if len(parts) > 1:
                                 metadata_buffer = parts[1]
                             continue
-                        
+
                         # If collecting metadata
                         if collecting_metadata:
                             metadata_buffer += chunk
-                            
+
                             # Check for metadata end
                             if "__METADATA_END__" in metadata_buffer:
                                 # Extract JSON between markers
@@ -308,12 +371,11 @@ with tab1:
 
             except Exception as e:
                 st.error(f"Stream failed: {e}")
-                # Optionally fall back to non-streaming
-    
+
     # Example queries
     st.markdown("---")
     st.markdown("#### 💡 Example Queries")
-    
+
     example_cols = st.columns(3)
     examples = [
         ("Rules", "How does the Matrix Initiative work?"),
@@ -323,7 +385,7 @@ with tab1:
         ("Character", "What cyberware did we find in the corp facility?"),
         ("Lore", "Tell me about the history of Aztechnology")
     ]
-    
+
     for i, (category, example) in enumerate(examples):
         with example_cols[i % 3]:
             if st.button(f"{category}: {example[:30]}...", key=f"ex_{i}"):
@@ -361,36 +423,37 @@ with tab2:
             st.session_state.uploader_key += 1
 
         elif action['type'] == 'process_all':
-            # Upload all files
             upload_errors = []
 
             for file_info in st.session_state.ready_files:
-                st.session_state.processing_files[file_info['id']] = {
-                    'name': file_info['name'],
-                    'size': file_info['size'],
-                    'file': file_info['file'],
-                    'stage': 'uploading'
-                }
-
-                # ACTUALLY UPLOAD EACH FILE
                 try:
                     files = {"file": (file_info['name'], file_info['file'].getvalue(), "application/pdf")}
                     response = requests.post(f"{API_URL}/upload", files=files)
 
                     if response.status_code == 200:
-                        st.session_state.processing_files[file_info['id']]['stage'] = 'processing'
-                        st.success(f"✅ {file_info['name']} uploaded successfully!")
+                        result = response.json()
+                        job_id = result['job_id']
+
+                        st.session_state.processing_files[file_info['id']] = {
+                            'name': file_info['name'],
+                            'size': file_info['size'],
+                            'job_id': job_id,
+                            'stage': 'uploading',
+                            'progress': 0,
+                            'details': 'Upload complete, processing started...',
+                            'start_time': datetime.now()
+                        }
+
+                        st.success(f"✅ {file_info['name']} uploaded! Job ID: {job_id}")
                     else:
                         upload_errors.append(file_info)
                         st.error(f"❌ Upload failed for {file_info['name']}: {response.text}")
-                        del st.session_state.processing_files[file_info['id']]
 
                 except Exception as e:
                     upload_errors.append(file_info)
                     st.error(f"❌ Upload error for {file_info['name']}: {str(e)}")
-                    del st.session_state.processing_files[file_info['id']]
 
-            # Keep failed uploads in ready_files, remove successful ones
+            # Keep failed uploads in ready_files
             st.session_state.ready_files = upload_errors
             if not st.session_state.ready_files:
                 st.session_state.uploader_key += 1
@@ -406,34 +469,34 @@ with tab2:
             file_info = next((f for f in st.session_state.ready_files if f['id'] == file_id), None)
 
             if file_info:
-                st.session_state.processing_files[file_id] = {
-                    'name': file_info['name'],
-                    'size': file_info['size'],
-                    'file': file_info['file'],
-                    'stage': 'uploading'
-                }
-
-                # ACTUALLY UPLOAD THE INDIVIDUAL FILE
                 try:
                     files = {"file": (file_info['name'], file_info['file'].getvalue(), "application/pdf")}
                     response = requests.post(f"{API_URL}/upload", files=files)
 
                     if response.status_code == 200:
-                        st.session_state.processing_files[file_id]['stage'] = 'processing'
-                        st.success(f"✅ {file_info['name']} uploaded successfully!")
-                        # Remove from ready files
+                        result = response.json()
+                        job_id = result['job_id']
+
+                        # Store processing info with job ID
+                        st.session_state.processing_files[file_id] = {
+                            'name': file_info['name'],
+                            'size': file_info['size'],
+                            'job_id': job_id,
+                            'stage': 'uploading',
+                            'progress': 0,
+                            'details': 'Upload complete, processing started...',
+                            'start_time': datetime.now()
+                        }
+
+                        st.success(f"✅ {file_info['name']} uploaded! Job ID: {job_id}")
                         st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
                         if not st.session_state.ready_files:
                             st.session_state.uploader_key += 1
                     else:
                         st.error(f"❌ Upload failed: {response.text}")
-                        # Don't move to processing on failure
-                        del st.session_state.processing_files[file_id]
 
                 except Exception as e:
                     st.error(f"❌ Upload error: {str(e)}")
-                    # Don't move to processing on error
-                    del st.session_state.processing_files[file_id]
 
         del st.session_state.action
         st.rerun()  # Single rerun after all actions
@@ -488,40 +551,107 @@ with tab2:
                     st.session_state.action = {'type': 'remove_file', 'file_id': file_info['id']}
                     st.rerun()
 
-    # Processing section - REMOVED AUTO-PROGRESS for speed
+    # Enhanced processing display with real-time WebSocket progress
     if st.session_state.processing_files:
         st.markdown("---")
-        st.subheader("🔄 Processing")
+        st.subheader("🔄 Processing Files")
 
-        for file_id, file_info in st.session_state.processing_files.items():
-            st.write(f"🔄 **{file_info['name']}** - Processing in background...")
+        for file_id, file_info in list(st.session_state.processing_files.items()):
+            job_id = file_info.get('job_id')
 
-            # Manual progress update button instead of auto-updates
-            col1, col2, col3 = st.columns(3)
+            # Update with real-time progress from WebSocket
+            if job_id and job_id in st.session_state.job_progress:
+                ws_progress = st.session_state.job_progress[job_id]
+
+                # Update file info with WebSocket data
+                file_info.update({
+                    'stage': ws_progress.get('stage', 'unknown'),
+                    'progress': ws_progress.get('progress', 0),
+                    'details': ws_progress.get('details', ''),
+                    'elapsed_time': ws_progress.get('elapsed_time', 0)
+                })
+
+            # Display file header
+            col1, col2 = st.columns([3, 1])
             with col1:
-                if st.button("🔄 Check Progress", key=f"progress_{file_id}"):
-                    # Simulate progress check
-                    current_stage = file_info.get('stage', 'uploading')
-                    stages = ['uploading', 'extracting', 'chunking', 'embedding', 'indexing', 'complete']
-                    if current_stage in stages:
-                        current_idx = stages.index(current_stage)
-                        if current_idx < len(stages) - 1:
-                            st.session_state.processing_files[file_id]['stage'] = stages[current_idx + 1]
-                        else:
-                            st.session_state.completed_files[file_id] = file_info
-                            del st.session_state.processing_files[file_id]
-                    st.rerun()
-
+                st.write(f"📄 **{file_info['name']}** ({file_info['size'] / 1024:.1f} KB)")
             with col2:
-                if st.button("✅ Mark Complete", key=f"complete_{file_id}"):
-                    st.session_state.completed_files[file_id] = file_info
-                    del st.session_state.processing_files[file_id]
-                    st.rerun()
+                if job_id:
+                    st.caption(f"Job: {job_id[-8:]}")  # Show last 8 chars of job ID
 
+            # Progress bar
+            progress_val = max(0, min(100, file_info.get('progress', 0))) / 100.0
+
+            if file_info.get('progress', 0) < 0:  # Error case
+                st.error("❌ Processing failed!")
+            else:
+                st.progress(progress_val)
+
+            # Stage indicator with detailed icons
+            stage_info = {
+                'starting': ('🚀', 'Initializing'),
+                'reading': ('📖', 'Reading PDF'),
+                'extraction': ('📝', 'Extracting Elements'),
+                'table_detection': ('📊', 'Table Detection'),
+                'cleaning': ('🧹', 'Cleaning Content'),
+                'chunking': ('✂️', 'Creating Chunks'),
+                'saving': ('💾', 'Saving Files'),
+                'indexing': ('🔍', 'Indexing for Search'),
+                'complete': ('🎉', 'Complete'),
+                'error': ('❌', 'Error')
+            }
+
+            current_stage = file_info.get('stage', 'unknown')
+            stage_icon, stage_label = stage_info.get(current_stage, ('⚙️', current_stage.title()))
+
+            col1, col2, col3 = st.columns([2, 1, 2])
+            with col1:
+                st.write(f"{stage_icon} **{stage_label}**")
+            with col2:
+                st.write(f"**{file_info.get('progress', 0):.0f}%**")
             with col3:
-                if st.button("❌ Cancel", key=f"cancel_{file_id}"):
-                    del st.session_state.processing_files[file_id]
-                    st.rerun()
+                elapsed = file_info.get('elapsed_time', 0)
+                if elapsed > 0:
+                    st.caption(f"⏱️ {elapsed:.1f}s elapsed")
+
+            # Details and special messaging
+            details = file_info.get('details', '')
+            if details:
+                st.caption(f"💬 {details}")
+
+            # Special alerts for long-running stages
+            if current_stage in ['extraction', 'table_detection']:
+                st.info("📊 **Table detection in progress** - This can take several minutes for complex documents with many tables...")
+            elif current_stage == 'chunking':
+                st.info("✂️ **Creating semantic chunks** - Breaking document into searchable sections...")
+            elif current_stage == 'indexing':
+                st.info("🔍 **Indexing for search** - Making content searchable...")
+
+            # Handle completion
+            if current_stage == 'complete':
+                # Move to completed
+                st.session_state.completed_files[file_id] = file_info
+                del st.session_state.processing_files[file_id]
+                # Clean up progress tracking
+                if job_id in st.session_state.job_progress:
+                    del st.session_state.job_progress[job_id]
+                st.rerun()
+
+            # Handle errors
+            elif current_stage == 'error':
+                st.error(f"❌ Processing failed: {details}")
+                # Move to completed with error status
+                file_info['status'] = 'error'
+                st.session_state.completed_files[file_id] = file_info
+                del st.session_state.processing_files[file_id]
+                st.rerun()
+
+            st.markdown("---")
+
+        # Auto-refresh for real-time updates every 3 seconds
+        if st.session_state.processing_files:
+            time.sleep(3)
+            st.rerun()
 
     # Completed section
     if st.session_state.completed_files:
@@ -529,7 +659,10 @@ with tab2:
         st.subheader("✅ Completed")
 
         for file_id, file_info in st.session_state.completed_files.items():
-            st.success(f"✅ **{file_info['name']}** - Successfully processed!")
+            if file_info.get('status') == 'error':
+                st.error(f"❌ **{file_info['name']}** - Processing failed!")
+            else:
+                st.success(f"✅ **{file_info['name']}** - Successfully processed!")
 
     # Manual indexing
     st.markdown("---")

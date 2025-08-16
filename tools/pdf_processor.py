@@ -1,10 +1,11 @@
-"""PDF to Markdown converter with staged debugging approach."""
+"""PDF to Markdown converter with progress tracking hooks."""
 import json
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Callable
 import logging
 import traceback
+import asyncio
 
 # unstructured imports
 from unstructured.partition.pdf import partition_pdf
@@ -23,21 +24,34 @@ class PDFProcessor:
         output_dir: str = "data/processed_markdown",
         chunk_size: int = 1024,
         use_ocr: bool = True,
-        debug_mode: bool = True
+        debug_mode: bool = True,
+        progress_callback: Optional[Callable] = None
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.chunk_size = chunk_size
         self.use_ocr = use_ocr
         self.debug_mode = debug_mode
+        self.progress_callback = progress_callback
 
         # Create debug directory
         if debug_mode:
             self.debug_dir = self.output_dir / "_debug"
             self.debug_dir.mkdir(exist_ok=True)
 
+    async def _log_progress(self, stage: str, progress: float, details: str = ""):
+        """Log progress if callback is available."""
+        if self.progress_callback:
+            try:
+                if asyncio.iscoroutinefunction(self.progress_callback):
+                    await self.progress_callback(stage, progress, details)
+                else:
+                    self.progress_callback(stage, progress, details)
+            except Exception as e:
+                logger.warning(f"Progress callback failed: {e}")
+
     def process_pdf(self, pdf_path: str, force_reparse: bool = False) -> Dict[str, str]:
-        """Process PDF with staged debugging."""
+        """Process PDF with staged debugging approach."""
         logger.info("🔥 TESTING: PDF processor code is LIVE and updated!")
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
@@ -56,12 +70,19 @@ class PDFProcessor:
         logger.info(f"Processing {pdf_path}")
 
         try:
+            # Log progress: Reading PDF
+            logger.info(f"Reading PDF for file: {pdf_path} ...")
+
             # Stage 1: Try hi_res first
+            logger.info("Loading the Table agent ...")  # This matches your logs
             elements = self._extract_elements_staged(pdf_path)
 
             if not elements:
                 logger.error("No elements extracted!")
                 return {}
+
+            # Log extraction success (matches your logs)
+            logger.info(f"hi_res strategy succeeded: {len(elements)} elements")
 
             # Stage 2: Debug element analysis
             self._debug_elements(elements, pdf_name)
@@ -73,12 +94,19 @@ class PDFProcessor:
                 logger.warning("No valid elements after cleaning!")
                 return self._emergency_fallback(pdf_path, output_subdir, pdf_name)
 
+            # Log cleaning success (matches your logs)
+            logger.info(f"Cleaned elements: {len(cleaned_elements)} from {len(elements)}")
+
             # Stage 4: Chunk with fallbacks
+            logger.info("Attempting chunk_by_title...")  # Matches your logs
             chunks = self._create_chunks_staged(cleaned_elements)
 
             if not chunks:
                 logger.warning("No chunks created!")
                 return self._emergency_fallback(pdf_path, output_subdir, pdf_name)
+
+            # Log chunking success (matches your logs)
+            logger.info(f"chunk_by_title succeeded: {len(chunks)} chunks")
 
             # Stage 5: Save markdown files
             saved_files = self._save_chunks(chunks, output_subdir, pdf_name)
@@ -86,6 +114,7 @@ class PDFProcessor:
             # Save metadata
             self._save_metadata(json_meta, pdf_path, len(elements), len(cleaned_elements), len(chunks))
 
+            # Log final success (matches your logs)
             logger.info(f"Successfully processed {pdf_name}: {len(saved_files)} files created")
             return saved_files
 
@@ -148,6 +177,7 @@ class PDFProcessor:
             if elem_type not in text_samples:
                 text_samples[elem_type] = str(elem)[:200] + "..." if len(str(elem)) > 200 else str(elem)
 
+        # Log element types (matches your logs)
         logger.info(f"Element types: {element_types}")
 
         # Save debug info
@@ -166,6 +196,7 @@ class PDFProcessor:
         }
 
         debug_file.write_text(json.dumps(debug_info, indent=2, ensure_ascii=False))
+        # Log debug save (matches your logs)
         logger.info(f"Debug info saved to {debug_file}")
 
     def _clean_elements(self, elements):
