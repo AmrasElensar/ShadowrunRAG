@@ -62,21 +62,18 @@ class Retriever:
 
     def get_model_options(self, query_type: str) -> dict:
         options = self.base_model_options.copy()
-        temp = 0.5
+        
+        # Llama3-optimized settings
         if query_type == "rules":
-            options.update({"temperature": 0.2, "top_k": 15, "top_p": 0.8, "mirostat": 2})
-            temp = 0.2
+            options.update({"temperature": 0.1, "top_k": 20, "top_p": 0.8})  # More focused
         elif query_type == "character":
-            options.update({"temperature": 0.3, "top_k": 25, "top_p": 0.85})
-            temp = 0.3
+            options.update({"temperature": 0.3, "top_k": 30, "top_p": 0.85})
         elif query_type == "session":
-            options.update({"temperature": 0.7, "top_k": 50, "top_p": 0.9})
-            temp = 0.7
+            options.update({"temperature": 0.6, "top_k": 40, "top_p": 0.9})  # More creative
         else:
-            options.update({"temperature": 0.5, "top_k": 40, "top_p": 0.9})
-            temp = 0.5
-
-        logger.info(f"Using {query_type} settings: temp={temp}")
+            options.update({"temperature": 0.4, "top_k": 35, "top_p": 0.9})  # Balanced
+            
+        logger.info(f"Using {query_type} settings: temp={options['temperature']}")
         return options
 
     def search(
@@ -114,16 +111,20 @@ class Retriever:
             self,
             prompt: str,
             query_type: str = "general",
-            custom_options: dict = None
+            custom_options: dict = None,
+            model: str = None
     ) -> str:
         """Generate complete answer as string (non-streaming)."""
         model_options = self.get_model_options(query_type)
         if custom_options:
             model_options.update(custom_options)
 
+        # Use passed model or fall back to default
+        model_to_use = model or self.llm_model
+
         try:
             response = ollama.generate(
-                model=self.llm_model,
+                model=model_to_use,
                 prompt=prompt,
                 stream=False,
                 options=model_options
@@ -138,16 +139,20 @@ class Retriever:
             self,
             prompt: str,
             query_type: str = "general",
-            custom_options: dict = None
+            custom_options: dict = None,
+            model: str = None
     ):
         """Generate answer as streaming generator."""
         model_options = self.get_model_options(query_type)
         if custom_options:
             model_options.update(custom_options)
 
+        # Use passed model or fall back to default
+        model_to_use = model or self.llm_model
+
         try:
             response = ollama.generate(
-                model=self.llm_model,
+                model=model_to_use,
                 prompt=prompt,
                 stream=True,
                 options=model_options
@@ -167,7 +172,8 @@ class Retriever:
         where_filter: Optional[Dict] = None,
         character_role: Optional[str] = None,
         character_stats: Optional[str] = None,
-        edition: Optional[str] = None
+        edition: Optional[str] = None,
+        model: Optional[str] = None
     ) -> Dict:
         """Complete RAG pipeline: search + generate (NON-STREAMING)."""
         search_results = self.search(question, n_results, where_filter)
@@ -219,7 +225,8 @@ class Retriever:
         answer = self.generate_answer(
             prompt=prompt,
             query_type=query_type,
-            custom_options={"temperature": self.get_model_options(query_type)["temperature"]}
+            custom_options={"temperature": self.get_model_options(query_type)["temperature"]},
+            model=model
         )
 
         # Format sources
@@ -241,7 +248,8 @@ class Retriever:
         where_filter: Optional[Dict] = None,
         character_role: Optional[str] = None,
         character_stats: Optional[str] = None,
-        edition: Optional[str] = None
+        edition: Optional[str] = None,
+        model: Optional[str] = None
     ):
         """Stream the answer token by token."""
         # Search
@@ -289,6 +297,7 @@ class Retriever:
         for token in self.generate_answer_stream(
             prompt=prompt,
             query_type=query_type,
-            custom_options={"temperature": self.get_model_options(query_type)["temperature"]}
+            custom_options={"temperature": self.get_model_options(query_type)["temperature"]},
+            model=model
         ):
             yield token

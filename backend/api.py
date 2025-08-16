@@ -44,6 +44,7 @@ class QueryRequest(BaseModel):
     character_role: Optional[str] = None
     character_stats: Optional[str] = None
     edition: Optional[str] = None
+    model: Optional[str] = None
 
 class IndexRequest(BaseModel):
     directory: str = "data/processed_markdown"
@@ -153,36 +154,45 @@ async def query_stream(request: QueryRequest):
 
         def generate():
             try:
-                # Run full RAG pipeline (only once)
-                result = retriever.query(
+                # Get search results first (non-streaming)
+                search_results = retriever.search(
                     question=request.question,
                     n_results=request.n_results,
-                    query_type=request.query_type,
-                    where_filter=final_filter,  # Fixed: Use final_filter
-                    character_role=request.character_role,
-                    character_stats=request.character_stats,
-                    edition=request.edition
+                    where_filter=final_filter
                 )
 
-                # Stream the answer token by token
-                answer = result["answer"]
-                for i in range(len(answer)):
-                    yield answer[i]
+                if not search_results['documents']:
+                    yield "No relevant information found in the indexed documents."
+                    return
 
-                # After answer, send metadata as a final JSON chunk
+                # Stream the actual generation (REAL streaming)
+                for token in retriever.query_stream(
+                        question=request.question,
+                        n_results=request.n_results,
+                        query_type=request.query_type,
+                        where_filter=final_filter,
+                        character_role=request.character_role,
+                        character_stats=request.character_stats,
+                        edition=request.edition,
+                        model=request.model
+                ):
+                    yield token
+
+                # Send metadata after streaming completes
                 metadata_packet = {
-                    "sources": result["sources"],
-                    "chunks": result["chunks"],
-                    "distances": result["distances"],
-                    "metadatas": result["metadatas"],
+                    "sources": list({meta.get('source', 'Unknown') for meta in search_results['metadatas']}),
+                    "chunks": search_results['documents'],
+                    "distances": search_results['distances'],
+                    "metadatas": search_results['metadatas'],
                     "done": True
                 }
-                # Fix: Ensure clean JSON with proper delimiters
-                yield f"\n__METADATA__{json.dumps(metadata_packet, ensure_ascii=False)}__METADATA__\n"
+
+                metadata_json = json.dumps(metadata_packet, ensure_ascii=False)
+                yield f"\n\n__METADATA_START__\n{metadata_json}\n__METADATA_END__\n"
 
             except Exception as e:
                 logger.error(f"Generation error: {e}")
-                yield f"Error: {str(e)}"
+                yield f"\n\nError: {str(e)}"
 
         return StreamingResponse(generate(), media_type="text/plain")
 
