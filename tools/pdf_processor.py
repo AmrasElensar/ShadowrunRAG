@@ -1,9 +1,10 @@
-"""PDF to Markdown converter with progress tracking hooks."""
+"""PDF to Markdown converter with REAL progress tracking via unstructured logging hooks."""
 import json
 import os
+import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
-import logging
 import traceback
 import asyncio
 
@@ -15,8 +16,120 @@ from unstructured.documents.elements import (
 )
 from unstructured.cleaners.core import clean_extra_whitespace, clean
 
-logging.basicConfig(level=logging.DEBUG)  # More verbose logging
+# Hook into unstructured logging
+from unstructured.logger import logger as unstructured_logger
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class UnstructuredProgressHandler(logging.Handler):
+    """Custom logging handler to capture real progress from unstructured library."""
+
+    def __init__(self, progress_callback: Callable, job_id: str, filename: str):
+        super().__init__()
+        self.progress_callback = progress_callback
+        self.job_id = job_id
+        self.filename = filename
+        self.start_time = time.time()
+        self.current_progress = 5
+
+        # Stage mapping based on unstructured log patterns
+        self.stage_patterns = {
+            # Early stages
+            "Reading PDF": ("reading", 10, "Reading PDF content..."),
+            "Loading the Table agent": ("table_detection", 15, "Loading table detection model..."),
+            "hi_res strategy": ("extraction", 25, "Using high-resolution extraction..."),
+            "fast strategy": ("extraction", 25, "Using fast text extraction..."),
+            "auto strategy": ("extraction", 25, "Auto-selecting extraction strategy..."),
+
+            # Progress indicators
+            "hi_res strategy succeeded": ("extraction_complete", 50, "Element extraction complete"),
+            "fast strategy succeeded": ("extraction_complete", 50, "Text extraction complete"),
+            "extraction complete": ("extraction_complete", 50, "Document parsing complete"),
+
+            # Element processing
+            "Element types": ("analyzing", 60, "Analyzing document structure..."),
+            "Cleaned elements": ("cleaning", 70, "Cleaning extracted content..."),
+
+            # Chunking stages
+            "Attempting chunk_by_title": ("chunking", 80, "Creating semantic chunks..."),
+            "chunk_by_title succeeded": ("chunking_complete", 85, "Chunking complete"),
+            "Manual chunking": ("chunking", 80, "Using fallback chunking..."),
+            "Manual chunking created": ("chunking_complete", 85, "Chunking complete"),
+
+            # Final stages
+            "Debug info saved": ("saving", 90, "Saving processed content..."),
+            "Successfully processed": ("complete", 100, "Processing complete!"),
+        }
+
+    def emit(self, record):
+        """Process log records and extract progress information."""
+        try:
+            message = record.getMessage()
+
+            # Check for known progress patterns
+            for pattern, (stage, progress, description) in self.stage_patterns.items():
+                if pattern in message:
+                    self.current_progress = max(self.current_progress, progress)
+
+                    # Extract additional details from log message
+                    details = description
+                    if "succeeded" in message and "elements" in message:
+                        # Extract element count: "hi_res strategy succeeded: 150 elements"
+                        try:
+                            count = message.split("succeeded:")[1].split("elements")[0].strip()
+                            details = f"{description} ({count} elements found)"
+                        except:
+                            pass
+                    elif "Cleaned elements" in message:
+                        # Extract cleaning info: "Cleaned elements: 120 from 150"
+                        try:
+                            parts = message.split(":")
+                            if len(parts) > 1:
+                                details = f"Cleaned and filtered elements: {parts[1].strip()}"
+                        except:
+                            pass
+                    elif "chunking created" in message:
+                        # Extract chunk count
+                        try:
+                            count = message.split("created")[1].split("chunks")[0].strip()
+                            details = f"Created {count} semantic chunks"
+                        except:
+                            pass
+
+                    # Send progress update
+                    self._send_progress_update(stage, self.current_progress, details)
+                    break
+
+            # Special handling for error patterns
+            if any(error_word in message.lower() for error_word in ["error", "failed", "exception"]):
+                if "processing failed" not in message.lower():  # Avoid our own error messages
+                    self._send_progress_update("error", -1, f"Processing error: {message}")
+
+        except Exception as e:
+            # Don't let logging errors break the main process
+            logger.warning(f"Progress handler error: {e}")
+
+    def _send_progress_update(self, stage: str, progress: float, details: str):
+        """Send progress update via callback."""
+        try:
+            elapsed = time.time() - self.start_time
+
+            # Create async task if callback is async
+            if self.progress_callback:
+                if asyncio.iscoroutinefunction(self.progress_callback):
+                    # Create task in the event loop
+                    try:
+                        loop = asyncio.get_event_loop()
+                        loop.create_task(self.progress_callback(stage, progress, details))
+                    except RuntimeError:
+                        # No event loop in this thread - skip async update
+                        pass
+                else:
+                    self.progress_callback(stage, progress, details)
+
+        except Exception as e:
+            logger.warning(f"Failed to send progress update: {e}")
 
 class PDFProcessor:
     def __init__(
@@ -39,20 +152,8 @@ class PDFProcessor:
             self.debug_dir = self.output_dir / "_debug"
             self.debug_dir.mkdir(exist_ok=True)
 
-    async def _log_progress(self, stage: str, progress: float, details: str = ""):
-        """Log progress if callback is available."""
-        if self.progress_callback:
-            try:
-                if asyncio.iscoroutinefunction(self.progress_callback):
-                    await self.progress_callback(stage, progress, details)
-                else:
-                    self.progress_callback(stage, progress, details)
-            except Exception as e:
-                logger.warning(f"Progress callback failed: {e}")
-
     def process_pdf(self, pdf_path: str, force_reparse: bool = False) -> Dict[str, str]:
-        """Process PDF with staged debugging approach."""
-        logger.info("🔥 TESTING: PDF processor code is LIVE and updated!")
+        """Process PDF with REAL progress tracking via unstructured logging."""
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
@@ -67,65 +168,100 @@ class PDFProcessor:
             logger.info(f"Skipping {pdf_name} (already processed)")
             return self._load_existing_files(output_subdir)
 
-        logger.info(f"Processing {pdf_path}")
+        logger.info(f"Processing {pdf_path} with REAL progress tracking")
+
+        # Set up progress tracking via logging
+        job_id = f"{pdf_name}_{int(time.time())}"
+        progress_handler = None
 
         try:
-            # Log progress: Reading PDF
-            logger.info(f"Reading PDF for file: {pdf_path} ...")
+            # Install our custom logging handler
+            if self.progress_callback:
+                progress_handler = UnstructuredProgressHandler(
+                    self.progress_callback, job_id, pdf_name
+                )
+                # Add to both unstructured logger and root logger to catch everything
+                unstructured_logger.addHandler(progress_handler)
+                logging.getLogger().addHandler(progress_handler)
 
-            # Stage 1: Try hi_res first
-            logger.info("Loading the Table agent ...")  # This matches your logs
-            elements = self._extract_elements_staged(pdf_path)
+                # Initial progress
+                self._send_progress(5, "starting", "Setting up PDF processing...")
+
+            # Stage 1: Extract elements using unstructured (this is where the real work happens)
+            logger.info("Reading PDF for file: %s ...", pdf_path)
+            elements = self._extract_elements_with_fallbacks(pdf_path)
 
             if not elements:
                 logger.error("No elements extracted!")
                 return {}
 
-            # Log extraction success (matches your logs)
-            logger.info(f"hi_res strategy succeeded: {len(elements)} elements")
+            logger.info("hi_res strategy succeeded: %d elements", len(elements))
 
-            # Stage 2: Debug element analysis
-            self._debug_elements(elements, pdf_name)
+            # Stage 2: Debug and analyze
+            if self.debug_mode:
+                self._debug_elements(elements, pdf_name)
 
-            # Stage 3: Clean and filter elements
+            # Stage 3: Clean elements
             cleaned_elements = self._clean_elements(elements)
-
             if not cleaned_elements:
                 logger.warning("No valid elements after cleaning!")
                 return self._emergency_fallback(pdf_path, output_subdir, pdf_name)
 
-            # Log cleaning success (matches your logs)
-            logger.info(f"Cleaned elements: {len(cleaned_elements)} from {len(elements)}")
+            logger.info("Cleaned elements: %d from %d", len(cleaned_elements), len(elements))
 
-            # Stage 4: Chunk with fallbacks
-            logger.info("Attempting chunk_by_title...")  # Matches your logs
-            chunks = self._create_chunks_staged(cleaned_elements)
+            # Stage 4: Create chunks
+            logger.info("Attempting chunk_by_title...")
+            chunks = self._create_chunks_with_fallbacks(cleaned_elements)
 
             if not chunks:
                 logger.warning("No chunks created!")
                 return self._emergency_fallback(pdf_path, output_subdir, pdf_name)
 
-            # Log chunking success (matches your logs)
-            logger.info(f"chunk_by_title succeeded: {len(chunks)} chunks")
+            logger.info("chunk_by_title succeeded: %d chunks", len(chunks))
 
-            # Stage 5: Save markdown files
+            # Stage 5: Save files
+            self._send_progress(90, "saving", "Saving markdown files...")
             saved_files = self._save_chunks(chunks, output_subdir, pdf_name)
 
             # Save metadata
             self._save_metadata(json_meta, pdf_path, len(elements), len(cleaned_elements), len(chunks))
 
-            # Log final success (matches your logs)
-            logger.info(f"Successfully processed {pdf_name}: {len(saved_files)} files created")
+            # Final success
+            logger.info("Successfully processed %s: %d files created", pdf_name, len(saved_files))
+            self._send_progress(100, "complete", f"Processing complete! Created {len(saved_files)} files.")
+
             return saved_files
 
         except Exception as e:
-            logger.error(f"Processing failed: {e}")
+            logger.error("Processing failed: %s", str(e))
             logger.error(traceback.format_exc())
+            self._send_progress(-1, "error", f"Processing failed: {str(e)}")
             # Try emergency fallback
             return self._emergency_fallback(pdf_path, output_subdir, pdf_name)
 
-    def _extract_elements_staged(self, pdf_path: Path):
-        """Try different extraction strategies in order of quality."""
+        finally:
+            # Clean up logging handler
+            if progress_handler:
+                unstructured_logger.removeHandler(progress_handler)
+                logging.getLogger().removeHandler(progress_handler)
+
+    def _send_progress(self, progress: float, stage: str, details: str):
+        """Send progress update if callback is available."""
+        if self.progress_callback:
+            try:
+                if asyncio.iscoroutinefunction(self.progress_callback):
+                    try:
+                        loop = asyncio.get_event_loop()
+                        loop.create_task(self.progress_callback(stage, progress, details))
+                    except RuntimeError:
+                        pass  # No event loop
+                else:
+                    self.progress_callback(stage, progress, details)
+            except Exception as e:
+                logger.warning(f"Progress callback failed: {e}")
+
+    def _extract_elements_with_fallbacks(self, pdf_path: Path):
+        """Extract elements using multiple strategies with fallbacks."""
         strategies = [
             ("hi_res", {
                 "strategy": "hi_res",
@@ -146,15 +282,13 @@ class PDFProcessor:
 
         for strategy_name, kwargs in strategies:
             try:
-                logger.info(f"Trying {strategy_name} strategy...")
+                logger.info("Trying %s strategy...", strategy_name)
                 elements = partition_pdf(filename=str(pdf_path), **kwargs)
-                logger.info(f"{strategy_name} strategy succeeded: {len(elements)} elements")
+                logger.info("%s strategy succeeded: %d elements", strategy_name, len(elements))
                 return elements
 
             except Exception as e:
-                logger.warning(f"{strategy_name} strategy failed: {e}")
-                if strategy_name == "hi_res":
-                    logger.info("hi_res failed - this might be a dependency issue, not hardware")
+                logger.warning("%s strategy failed: %s", strategy_name, str(e))
                 continue
 
         logger.error("All extraction strategies failed!")
@@ -169,16 +303,15 @@ class PDFProcessor:
         element_types = {}
         text_samples = {}
 
-        for i, elem in enumerate(elements):
+        for elem in elements:
             elem_type = type(elem).__name__
             element_types[elem_type] = element_types.get(elem_type, 0) + 1
 
-            # Sample text for each type
             if elem_type not in text_samples:
-                text_samples[elem_type] = str(elem)[:200] + "..." if len(str(elem)) > 200 else str(elem)
+                text = str(elem)
+                text_samples[elem_type] = text[:200] + "..." if len(text) > 200 else text
 
-        # Log element types (matches your logs)
-        logger.info(f"Element types: {element_types}")
+        logger.info("Element types: %s", element_types)
 
         # Save debug info
         debug_file = self.debug_dir / f"{pdf_name}_elements_debug.json"
@@ -196,16 +329,15 @@ class PDFProcessor:
         }
 
         debug_file.write_text(json.dumps(debug_info, indent=2, ensure_ascii=False))
-        # Log debug save (matches your logs)
-        logger.info(f"Debug info saved to {debug_file}")
+        logger.info("Debug info saved to %s", debug_file)
 
     def _clean_elements(self, elements):
-        """Clean and filter elements with inclusive approach."""
+        """Clean and filter elements."""
         cleaned = []
 
         for elem in elements:
             elem_text = str(elem).strip()
-            if not elem_text or len(elem_text) < 3:  # Skip very short elements
+            if not elem_text or len(elem_text) < 3:
                 continue
 
             # Include most text-bearing elements
@@ -216,18 +348,17 @@ class PDFProcessor:
                     elem.text = text
                     cleaned.append(elem)
             elif hasattr(elem, 'text') and elem.text and elem.text.strip():
-                # Catch other elements with text
                 text = clean_extra_whitespace(elem.text)
                 text = clean(text, bullets=False)
                 if text.strip():
                     elem.text = text
                     cleaned.append(elem)
 
-        logger.info(f"Cleaned elements: {len(cleaned)} from {len(elements)}")
+        logger.info("Cleaned elements: %d from %d", len(cleaned), len(elements))
         return cleaned
 
-    def _create_chunks_staged(self, elements):
-        """Try chunking with multiple fallbacks."""
+    def _create_chunks_with_fallbacks(self, elements):
+        """Create chunks with multiple fallback strategies."""
         # Try 1: chunk_by_title
         try:
             logger.info("Attempting chunk_by_title...")
@@ -237,12 +368,12 @@ class PDFProcessor:
                 overlap=self.chunk_size // 2,
             )
             if chunks:
-                logger.info(f"chunk_by_title succeeded: {len(chunks)} chunks")
+                logger.info("chunk_by_title succeeded: %d chunks", len(chunks))
                 return chunks
         except Exception as e:
-            logger.warning(f"chunk_by_title failed: {e}")
+            logger.warning("chunk_by_title failed: %s", str(e))
 
-        # Try 2: Manual size-based chunking
+        # Try 2: Manual chunking fallback
         logger.info("Using manual chunking fallback...")
         return self._manual_chunk(elements)
 
@@ -257,7 +388,6 @@ class PDFProcessor:
             elem_text = str(elem)
             elem_size = len(elem_text)
 
-            # Start new chunk if current would be too large
             if current_size + elem_size > max_size and current_chunk:
                 chunk_obj = type('Chunk', (), {
                     'elements': current_chunk.copy(),
@@ -278,7 +408,7 @@ class PDFProcessor:
             })
             chunks.append(chunk_obj)
 
-        logger.info(f"Manual chunking created {len(chunks)} chunks")
+        logger.info("Manual chunking created %d chunks", len(chunks))
         return chunks
 
     def _save_chunks(self, chunks, output_dir, pdf_name):
@@ -318,7 +448,7 @@ class PDFProcessor:
                 saved_files[str(file_path)] = md_content
 
             except Exception as e:
-                logger.warning(f"Failed to save chunk {i}: {e}")
+                logger.warning("Failed to save chunk %d: %s", i, str(e))
                 continue
 
         return saved_files
@@ -376,10 +506,10 @@ class PDFProcessor:
                 file_path = output_dir / f"{pdf_name}_fallback.md"
                 md_content = f"# {pdf_name}\n\n{text}"
                 file_path.write_text(md_content, encoding='utf-8')
-                logger.info(f"Emergency fallback created: {file_path}")
+                logger.info("Emergency fallback created: %s", file_path)
                 return {str(file_path): md_content}
         except Exception as e:
-            logger.error(f"Emergency fallback failed: {e}")
+            logger.error("Emergency fallback failed: %s", str(e))
 
         return {}
 
@@ -398,5 +528,5 @@ class PDFProcessor:
             "total_elements": total_elements,
             "cleaned_elements": cleaned_elements,
             "chunks_created": chunks,
-            "processor_version": "debug_v1"
+            "processor_version": "real_progress_v1"
         }, indent=2))

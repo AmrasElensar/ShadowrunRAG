@@ -1,9 +1,10 @@
-"""Streamlit web UI for Shadowrun RAG system with WebSocket progress tracking."""
+"""Streamlit web UI with FIXED WebSocket progress tracking + intelligent polling fallback."""
 import os
 import time
 import threading
 import json
 from datetime import datetime
+from typing import Dict, Optional
 
 import streamlit as st
 import requests
@@ -23,18 +24,184 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize session state
+# FIXED: Global progress storage (not tied to session state)
+if 'global_progress' not in st.session_state:
+    st.session_state.global_progress = {}
+if 'websocket_connected' not in st.session_state:
+    st.session_state.websocket_connected = False
+if 'websocket_thread' not in st.session_state:
+    st.session_state.websocket_thread = None
+
+# Initialize other session state
 if 'query_input' not in st.session_state:
     st.session_state.query_input = ""
-if 'job_progress' not in st.session_state:
-    st.session_state.job_progress = {}
-if 'ws_connected' not in st.session_state:
-    st.session_state.ws_connected = False
+if 'ready_files' not in st.session_state:
+    st.session_state.ready_files = []
+if 'processing_files' not in st.session_state:
+    st.session_state.processing_files = {}
+if 'completed_files' not in st.session_state:
+    st.session_state.completed_files = {}
+if 'uploader_key' not in st.session_state:
+    st.session_state.uploader_key = 0
 
-# Custom CSS
+# FIXED: Thread-safe WebSocket handler
+class ProgressWebSocketHandler:
+    """Thread-safe WebSocket handler for real-time progress updates."""
+
+    def __init__(self):
+        self.ws = None
+        self.running = False
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
+        self.connected = False  # Thread-safe connection status
+        self.global_progress = {}  # Thread-safe progress storage
+        self.lock = threading.Lock()
+
+    def on_message(self, ws, message):
+        """Handle incoming progress messages."""
+        try:
+            data = json.loads(message)
+            job_id = data.get('job_id')
+
+            if job_id:
+                # Store in thread-safe global progress
+                with self.lock:
+                    self.global_progress[job_id] = data
+
+                logger.info(f"WebSocket progress update: {job_id} - {data.get('stage')} ({data.get('progress')}%)")
+
+        except Exception as e:
+            logger.error(f"WebSocket message error: {e}")
+
+    def on_error(self, ws, error):
+        """Handle WebSocket errors."""
+        logger.warning(f"WebSocket error: {error}")
+        with self.lock:
+            self.connected = False
+
+    def on_close(self, ws, close_status_code, close_msg):
+        """Handle WebSocket close."""
+        logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
+        with self.lock:
+            self.connected = False
+
+        # Only attempt reconnection if we were deliberately running
+        if self.running and self.reconnect_attempts < self.max_reconnect_attempts:
+            self.reconnect_attempts += 1
+            logger.info(f"Attempting WebSocket reconnection {self.reconnect_attempts}/{self.max_reconnect_attempts}")
+            time.sleep(min(2 ** self.reconnect_attempts, 30))  # Cap at 30 seconds
+
+            # Only reconnect if we're still supposed to be running
+            if self.running:
+                self.connect()
+
+    def on_open(self, ws):
+        """Handle WebSocket open."""
+        logger.info("WebSocket connected successfully")
+        with self.lock:
+            self.connected = True
+        self.reconnect_attempts = 0
+
+    def connect(self):
+        """Connect to WebSocket."""
+        with self.lock:
+            if self.connected:
+                return
+
+        try:
+            ws_url = API_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/progress'
+            logger.info(f"Attempting WebSocket connection to: {ws_url}")
+
+            # Test if the backend is reachable first
+            try:
+                import requests
+                health_check = requests.get(f"{API_URL}/", timeout=5)
+                logger.info(f"Backend health check: {health_check.status_code}")
+            except Exception as e:
+                logger.error(f"Backend not reachable: {e}")
+                with self.lock:
+                    self.connected = False
+                return
+
+            self.ws = websocket.WebSocketApp(
+                ws_url,
+                on_message=self.on_message,
+                on_error=self.on_error,
+                on_close=self.on_close,
+                on_open=self.on_open
+            )
+
+            self.running = True
+            logger.info("Starting WebSocket run_forever...")
+            self.ws.run_forever()
+
+        except Exception as e:
+            logger.error(f"WebSocket connection failed: {e}")
+            with self.lock:
+                self.connected = False
+
+    def disconnect(self):
+        """Disconnect WebSocket."""
+        self.running = False
+        if self.ws:
+            self.ws.close()
+
+    def is_connected(self):
+        """Thread-safe connection status check."""
+        with self.lock:
+            return self.connected
+
+    def get_progress(self, job_id):
+        """Thread-safe progress retrieval."""
+        with self.lock:
+            return self.global_progress.get(job_id)
+
+    def get_all_progress(self):
+        """Get all progress data (thread-safe)."""
+        with self.lock:
+            return self.global_progress.copy()
+
+# Global WebSocket handler
+websocket_handler = ProgressWebSocketHandler()
+
+def start_websocket_connection():
+    """Start WebSocket connection in background thread."""
+    if not st.session_state.websocket_connected and not st.session_state.websocket_thread:
+        def run_websocket():
+            websocket_handler.connect()
+
+        thread = threading.Thread(target=run_websocket, daemon=True)
+        thread.start()
+        st.session_state.websocket_thread = thread
+        logger.info("WebSocket thread started")
+
+def poll_job_status(job_id: str) -> Optional[Dict]:
+    """Poll job status as fallback when WebSocket is unavailable."""
+    try:
+        response = api_request(f"/job/{job_id}", timeout=3)
+        if response and response.get('job_id'):
+            # Store in global progress
+            st.session_state.global_progress[job_id] = response
+            return response
+    except Exception as e:
+        logger.warning(f"Polling failed for {job_id}: {e}")
+    return None
+
+def get_job_progress(job_id: str) -> Optional[Dict]:
+    """Get job progress from global storage or polling."""
+    # First check global progress storage
+    if job_id in st.session_state.global_progress:
+        return st.session_state.global_progress[job_id]
+
+    # Fallback to polling if WebSocket not connected
+    if not st.session_state.websocket_connected:
+        return poll_job_status(job_id)
+
+    return None
+
+# Custom CSS (same as before)
 st.markdown("""
 <style>
-/* Theme-aware styling */
 :root {
     --bg-primary: #f0f2f6;
     --bg-secondary: #f8f9fa;
@@ -46,7 +213,6 @@ st.markdown("""
     gap: 24px;
 }
 
-/* Override in dark mode */
 @media (prefers-color-scheme: dark) {
     :root {
         --bg-primary: #262730;
@@ -75,7 +241,6 @@ st.markdown("""
     border-radius: 0 4px 4px 0;
 }
 
-/* Ensure markdown text is readable */
 .stMarkdown {
     color: var(--text-color);
 }
@@ -85,90 +250,54 @@ st.markdown("""
     color: #666;
     margin-bottom: 10px;
 }
+
+.status-indicator {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 8px;
+}
+
+.status-connected { background-color: #28a745; }
+.status-disconnected { background-color: #dc3545; }
+.status-connecting { background-color: #ffc107; }
 </style>
 """, unsafe_allow_html=True)
 
-# WebSocket functions
-def on_progress_message(ws, message):
-    """Handle incoming WebSocket progress messages."""
-    try:
-        data = json.loads(message)
-        job_id = data['job_id']
+# Start WebSocket connection
+start_websocket_connection()
 
-        # Check if session state exists and is accessible
-        if hasattr(st, 'session_state') and hasattr(st.session_state, 'job_progress'):
-            st.session_state.job_progress[job_id] = data
-            logger.info(f"Progress update: {job_id} - {data['stage']} ({data['progress']}%)")
-        else:
-            logger.warning(f"Session state not accessible for progress update: {job_id}")
+# Auto-refresh for connection status (only if not actively processing and not too frequent)
+if 'last_refresh' not in st.session_state:
+    st.session_state.last_refresh = time.time()
 
-    except Exception as e:
-        logger.error(f"Progress message error: {e}")
+# Only refresh every 30 seconds and only when not processing
+if not st.session_state.processing_files and (time.time() - st.session_state.last_refresh) > 30:
+    st.session_state.last_refresh = time.time()
+    st.rerun()
 
-def on_ws_error(ws, error):
-    logger.error(f"WebSocket error: {error}")
-    st.session_state.ws_connected = False
-
-def on_ws_close(ws, close_status_code, close_msg):
-    logger.info("WebSocket connection closed")
-    st.session_state.ws_connected = False
-
-def connect_progress_websocket():
-    """Connect to the progress WebSocket."""
-    if st.session_state.ws_connected:
-        return
-
-    try:
-        # Convert HTTP URL to WebSocket URL
-        ws_url = API_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/progress'
-        logger.info(f"Connecting to WebSocket: {ws_url}")
-
-        ws = websocket.WebSocketApp(
-            ws_url,
-            on_message=on_progress_message,
-            on_error=on_ws_error,
-            on_close=on_ws_close
-        )
-
-        def run_websocket():
-            ws.run_forever()
-
-        # Run WebSocket in background thread
-        ws_thread = threading.Thread(target=run_websocket, daemon=True)
-        ws_thread.start()
-        st.session_state.ws_connected = True
-        logger.info("WebSocket connection started")
-
-    except Exception as e:
-        logger.error(f"Failed to connect WebSocket: {e}")
-
-# Auto-connect WebSocket on app start
-if not st.session_state.ws_connected:
-    connect_progress_websocket()
-
-@st.cache_data(ttl=30)  # Cache for 30 seconds
+@st.cache_data(ttl=30)
 def get_available_models():
     """Fetch available models with caching."""
     try:
-        response = api_request("/models", timeout=5)  # Add timeout
+        response = api_request("/models", timeout=5)
         models = response.get("models", ["llama3"]) if response else ["llama3"]
-        # Ensure we always return at least one model to prevent empty selectbox
         return models if models else ["llama3"]
     except Exception as e:
         logger.warning(f"Failed to fetch models: {e}")
-        return ["llama3"]  # Always return a list with at least one item
+        return ["llama3"]
 
-@st.cache_data(ttl=30)  # Cache for 30 seconds
+@st.cache_data(ttl=30)
 def get_available_documents():
     """Fetch available documents with caching."""
     try:
-        # Longer timeout for documents as it might need to query ChromaDB
-        response = api_request("/documents", timeout=15)  # Increased from 5 to 15 seconds
+        response = api_request("/documents", timeout=15)
         docs = response.get("documents", []) if response else []
-        return docs if isinstance(docs, list) else []  # Ensure it's always a list
+        return docs if isinstance(docs, list) else []
     except Exception as e:
         logger.warning(f"Failed to fetch documents: {e}")
-        return []  # Always return a list
+        return []
 
 def api_request(endpoint: str, method: str = "GET", timeout: int = 10, **kwargs):
     """Make API request with error handling and timeout."""
@@ -181,37 +310,59 @@ def api_request(endpoint: str, method: str = "GET", timeout: int = 10, **kwargs)
         st.error(f"API Error: {str(e)}")
         return None
 
+# Start WebSocket connection immediately after initialization
+start_websocket_connection()
+
 # Title and description
 st.title("🎲 Shadowrun RAG Assistant")
 st.markdown("*Your AI-powered guide to the Sixth World*")
 
-# Sidebar
+# Connection status indicator with debugging
+col1, col2 = st.columns([4, 1])
+with col2:
+    # Update session state from thread-safe WebSocket handler
+    st.session_state.websocket_connected = websocket_handler.is_connected()
+
+    # Try to restart connection if it's been disconnected for a while
+    if not st.session_state.websocket_connected and st.session_state.websocket_thread is None:
+        logger.info("WebSocket not connected, attempting to restart...")
+        start_websocket_connection()
+
+    if st.session_state.websocket_connected:
+        st.markdown('<span class="status-indicator status-connected"></span>**WebSocket Connected**',
+                   unsafe_allow_html=True)
+    else:
+        st.markdown('<span class="status-indicator status-disconnected"></span>**WebSocket Disconnected** (using polling)',
+                   unsafe_allow_html=True)
+
+# Debug info (remove this after testing)
+with st.expander("🔧 WebSocket Debug Info"):
+    st.write(f"**WebSocket URL:** {API_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/ws/progress")
+    st.write(f"**Thread alive:** {st.session_state.websocket_thread and st.session_state.websocket_thread.is_alive() if st.session_state.websocket_thread else 'No thread'}")
+    st.write(f"**Handler connected:** {websocket_handler.is_connected()}")
+    st.write(f"**Reconnect attempts:** {websocket_handler.reconnect_attempts}")
+
+    if st.button("🔄 Force Reconnect"):
+        # Reset the connection
+        st.session_state.websocket_thread = None
+        websocket_handler.disconnect()
+        websocket_handler.reconnect_attempts = 0
+        start_websocket_connection()
+        st.rerun()
+
+# Sidebar (same as before, shortened for brevity)
 with st.sidebar:
     st.header("⚙️ Configuration")
 
-    # Cached model selection - only hits API every 30 seconds
     available_models = get_available_models()
+    selected_model = st.selectbox("LLM Model", available_models, index=0, key="model_selectbox")
 
-    # Initialize the selectbox with a key to prevent state errors
-    selected_model = st.selectbox(
-        "LLM Model",
-        available_models,
-        index=0,
-        key="model_selectbox"  # Add explicit key
-    )
-
-    # Query settings
     st.subheader("Query Settings")
     n_results = st.slider("Number of sources", 1, 10, 5)
-
     query_type = st.selectbox(
         "Query Type",
         ["general", "rules", "session"],
-        format_func=lambda x: {
-            "general": "General Query",
-            "rules": "Rules Question",
-            "session": "Session History"
-        }[x]
+        format_func=lambda x: {"general": "General Query", "rules": "Rules Question", "session": "Session History"}[x]
     )
 
     st.subheader("👤 Character Context")
@@ -220,39 +371,20 @@ with st.sidebar:
         ["None", "Decker", "Mage", "Street Samurai", "Rigger", "Adept", "Technomancer", "Face"],
         index=0
     )
-    st.caption("*Character role auto-filters to relevant section if no manual filter is selected*")
     character_role = None if character_role == "None" else character_role.lower().replace(" ", "_")
 
-    character_stats = st.text_input(
-        "Character Stats (optional)",
-        placeholder="e.g., Logic 6, Hacking 5, Sleaze 4"
-    )
+    character_stats = st.text_input("Character Stats (optional)", placeholder="e.g., Logic 6, Hacking 5, Sleaze 4")
 
-    edition = st.selectbox(
-        "Preferred Edition (optional)",
-        ["None", "SR5", "SR6", "SR4"],
-        index=0
-    )
+    edition = st.selectbox("Preferred Edition (optional)", ["None", "SR5", "SR6", "SR4"], index=0)
     edition = None if edition == "None" else edition
 
-    # Section filter (static - no API call)
+    # Filters
     section_options = ["All", "Combat", "Matrix", "Magic", "Gear", "Character Creation", "Riggers", "Technomancy"]
-    filter_section = st.selectbox(
-        "Filter by Section (optional)",
-        section_options,
-        index=0
-    )
+    filter_section = st.selectbox("Filter by Section (optional)", section_options, index=0)
     filter_section = None if filter_section == "All" else filter_section
 
-    # Subsection filter (static - no API call)
-    filter_subsection = st.text_input(
-        "Filter by Subsection (optional)",
-        placeholder="e.g., Hacking, Spellcasting, Initiative"
-    )
+    filter_subsection = st.text_input("Filter by Subsection (optional)", placeholder="e.g., Hacking, Spellcasting, Initiative")
     filter_subsection = None if filter_subsection.strip() == "" else filter_subsection
-
-    # Note: Document source filter moved to Documents tab
-    filter_source = None
 
 # Main interface tabs
 tab1, tab2, tab3, tab4 = st.tabs(["💬 Query", "📤 Upload", "📚 Documents", "📝 Session Notes"])
@@ -260,41 +392,35 @@ tab1, tab2, tab3, tab4 = st.tabs(["💬 Query", "📤 Upload", "📚 Documents",
 with tab1:
     st.header("Ask a Question")
 
-    # Query input
     col1, col2 = st.columns([5, 1])
     with col1:
         query = st.text_area(
             "Your question:",
             value=st.session_state.query_input,
-            key="query_input",  # This syncs with session state
+            key="query_input",
             placeholder="e.g., 'How do recoil penalties work in Shadowrun 5e?' or 'What happened in our last session?'",
             height=100
         )
 
     with col2:
-        st.write("")  # Spacer
+        st.write("")
         st.write("")
         search_button = st.button("🔍 Search", type="primary", use_container_width=True)
 
-    # Handle query
+    # Handle query (same as before - query logic unchanged)
     if search_button and query:
         with st.spinner("Streaming from the shadows..."):
             try:
-                # Build where_filter for metadata filtering
                 where_filter = {}
 
-                # Role-based section filter
                 role_to_section = {
                     "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
                     "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Technomancy"
                 }
 
-                if filter_source:
-                    where_filter["source"] = {"$contains": filter_source}
                 if filter_section:
                     where_filter["Section"] = filter_section
                 else:
-                    # No manual section → use role as convenience
                     if character_role and character_role in role_to_section:
                         where_filter["Section"] = role_to_section[character_role]
                 if filter_subsection:
@@ -316,7 +442,6 @@ with tab1:
                 )
                 response.raise_for_status()
 
-                # Stream the answer
                 st.markdown("### 🎯 Answer")
                 message_placeholder = st.empty()
                 full_response = ""
@@ -326,9 +451,7 @@ with tab1:
 
                 for chunk in response.iter_content(chunk_size=32, decode_unicode=True):
                     if chunk:
-                        # Check for metadata start
                         if "__METADATA_START__" in chunk:
-                            # Split at metadata start
                             parts = chunk.split("__METADATA_START__")
                             if parts[0]:
                                 full_response += parts[0]
@@ -339,30 +462,23 @@ with tab1:
                                 metadata_buffer = parts[1]
                             continue
 
-                        # If collecting metadata
                         if collecting_metadata:
                             metadata_buffer += chunk
 
-                            # Check for metadata end
                             if "__METADATA_END__" in metadata_buffer:
-                                # Extract JSON between markers
                                 json_part = metadata_buffer.split("__METADATA_END__")[0].strip()
                                 try:
                                     metadata = json.loads(json_part)
                                     logger.info("Successfully parsed metadata")
                                 except json.JSONDecodeError as e:
                                     logger.error(f"Metadata parse failed: {e}")
-                                    logger.error(f"Raw metadata: {json_part[:200]}...")
                                 break
                         else:
-                            # Normal content streaming
                             full_response += chunk
                             message_placeholder.markdown(full_response + "▌")
 
-                # Final update without cursor
                 message_placeholder.markdown(full_response)
 
-                # Display sources from metadata
                 if metadata and metadata.get('sources'):
                     st.markdown("### 📖 Sources")
                     cols = st.columns(min(len(metadata['sources']), 3))
@@ -378,78 +494,58 @@ with tab1:
             except Exception as e:
                 st.error(f"Stream failed: {e}")
 
-    # Example queries
-    st.markdown("---")
-    st.markdown("#### 💡 Example Queries")
+def sync_websocket_progress():
+    """Sync progress from WebSocket handler to session state for UI updates."""
+    # Get all progress from thread-safe WebSocket handler
+    all_progress = websocket_handler.get_all_progress()
 
-    example_cols = st.columns(3)
-    examples = [
-        ("Rules", "How does the Matrix Initiative work?"),
-        ("Combat", "What are the modifiers for called shots?"),
-        ("Magic", "How do you learn new spells as a mage?"),
-        ("Session", "Who was the Johnson from our last run?"),
-        ("Character", "What cyberware did we find in the corp facility?"),
-        ("Lore", "Tell me about the history of Aztechnology")
-    ]
-
-    for i, (category, example) in enumerate(examples):
-        with example_cols[i % 3]:
-            if st.button(f"{category}: {example[:30]}...", key=f"ex_{i}"):
-                st.session_state.query_input = example
-                st.rerun()
+    # Update session state for UI (only in main thread)
+    for job_id, progress_data in all_progress.items():
+        # Find matching processing files and update them
+        for file_id, file_info in st.session_state.processing_files.items():
+            if file_info.get('job_id') == job_id:
+                file_info.update({
+                    'stage': progress_data.get('stage', 'unknown'),
+                    'progress': progress_data.get('progress', 0),
+                    'details': progress_data.get('details', ''),
+                    'timestamp': progress_data.get('timestamp', time.time())
+                })
 
 with tab2:
     st.header("Upload PDFs")
 
-    # CSS to hide file uploader file list - Using stable selectors
+    # CSS to hide file uploader file list
     st.markdown("""
     <style>
-    /* Target the file list container directly - more reliable approach */
     div[data-testid="stFileUploader"] > div:last-child {
         display: none !important;
     }
     
-    /* Alternative: Hide any element containing uploaded file data */
     div[data-testid="stFileUploader"] ul {
         display: none !important;
     }
     
-    /* Hide individual file items */
     .stFileUploaderFile {
         display: none !important;
     }
     
-    /* Hide file data sections */
     div[data-testid="stFileUploaderFile"] {
         display: none !important;
     }
     
-    /* Target by structure: file uploader > last div (which contains the file list) */
     .stFileUploader > div:last-of-type {
         display: none !important;
     }
     
-    /* Hide elements with file names */
     div[data-testid="stFileUploaderFileName"] {
         display: none !important;
     }
     
-    /* Hide delete buttons */
     div[data-testid="stFileUploaderDeleteBtn"] {
         display: none !important;
     }
     </style>
     """, unsafe_allow_html=True)
-
-    # Initialize session state
-    if 'ready_files' not in st.session_state:
-        st.session_state.ready_files = []
-    if 'processing_files' not in st.session_state:
-        st.session_state.processing_files = {}
-    if 'completed_files' not in st.session_state:
-        st.session_state.completed_files = {}
-    if 'uploader_key' not in st.session_state:
-        st.session_state.uploader_key = 0
 
     # Process pending actions ONCE at the start
     if 'action' in st.session_state:
@@ -467,7 +563,7 @@ with tab2:
                 st.session_state.processing_files[file_info['id']] = {
                     'name': file_info['name'],
                     'size': file_info['size'],
-                    'job_id': 'pending',  # Special marker
+                    'job_id': 'pending',
                     'stage': 'preparing',
                     'progress': 0,
                     'details': 'Preparing to upload...',
@@ -501,7 +597,7 @@ with tab2:
                 st.session_state.processing_files[file_id] = {
                     'name': file_info['name'],
                     'size': file_info['size'],
-                    'job_id': 'pending',  # Special marker
+                    'job_id': 'pending',
                     'stage': 'preparing',
                     'progress': 0,
                     'details': 'Preparing to upload...',
@@ -617,40 +713,59 @@ with tab2:
                 if st.button("❌ Remove", key=f"rem_{file_info['id']}"):
                     st.session_state.action = {'type': 'remove_file', 'file_id': file_info['id']}
                     st.rerun()
+            st.rerun()
 
-    # Enhanced processing display with manual progress polling instead of WebSocket session state
+        for file_info in st.session_state.ready_files:
+            st.write(f"📄 **{file_info['name']}** ({file_info['size'] / 1024:.1f} KB)")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📤 Process", key=f"proc_{file_info['id']}"):
+                    st.session_state.action = {'type': 'process_file', 'file_id': file_info['id']}
+                    st.rerun()
+            with col2:
+                if st.button("❌ Remove", key=f"rem_{file_info['id']}"):
+                    st.session_state.action = {'type': 'remove_file', 'file_id': file_info['id']}
+                    st.rerun()
+
+    # ENHANCED processing display with real progress tracking
     if st.session_state.processing_files:
         st.markdown("---")
         st.subheader("🔄 Processing Files")
 
+        # Sync progress from WebSocket handler to session state
+        sync_websocket_progress()
+
         for file_id, file_info in list(st.session_state.processing_files.items()):
             job_id = file_info.get('job_id')
 
-            # Poll backend for progress instead of relying on WebSocket session state
+            # Get REAL progress from WebSocket handler or polling
             if job_id and job_id != 'pending':
-                try:
-                    # Get current job status from backend
-                    status_response = api_request(f"/job/{job_id}", timeout=5)
-                    if status_response and status_response.get('stage'):
-                        # Update file info with backend data
-                        file_info.update({
-                            'stage': status_response.get('stage', 'unknown'),
-                            'progress': status_response.get('progress', 0),
-                            'details': status_response.get('details', ''),
-                            'elapsed_time': status_response.get('elapsed_time', 0)
-                        })
-                except Exception as e:
-                    logger.warning(f"Failed to poll job status: {e}")
+                progress_data = get_job_progress(job_id)
+                if progress_data:
+                    # Update file info with REAL progress
+                    file_info.update({
+                        'stage': progress_data.get('stage', 'unknown'),
+                        'progress': progress_data.get('progress', 0),
+                        'details': progress_data.get('details', ''),
+                        'timestamp': progress_data.get('timestamp', time.time())
+                    })
 
             # Display file header
-            col1, col2 = st.columns([3, 1])
+            col1, col2, col3 = st.columns([2, 1, 1])
             with col1:
                 st.write(f"📄 **{file_info['name']}** ({file_info['size'] / 1024:.1f} KB)")
             with col2:
                 if job_id and job_id != 'pending':
-                    st.caption(f"Job: {job_id[-8:]}")  # Show last 8 chars of job ID
+                    st.caption(f"Job: {job_id[-8:]}")
+            with col3:
+                # Connection status for this job
+                if websocket_handler.is_connected():
+                    st.caption("🟢 Real-time")
+                else:
+                    st.caption("🟡 Polling")
 
-            # Progress bar
+            # Progress bar with real values
             progress_val = max(0, min(100, file_info.get('progress', 0))) / 100.0
 
             if file_info.get('progress', 0) < 0:  # Error case
@@ -658,20 +773,22 @@ with tab2:
             else:
                 st.progress(progress_val)
 
-            # Stage indicator with detailed icons
+            # ENHANCED stage indicator with real stages from unstructured
             stage_info = {
                 'starting': ('🚀', 'Initializing'),
                 'reading': ('📖', 'Reading PDF'),
-                'extraction': ('📝', 'Extracting Elements'),
+                'extraction': ('🔍', 'Extracting Elements'),
                 'table_detection': ('📊', 'Table Detection'),
+                'extraction_complete': ('✅', 'Extraction Complete'),
+                'analyzing': ('🔬', 'Analyzing Structure'),
                 'cleaning': ('🧹', 'Cleaning Content'),
                 'chunking': ('✂️', 'Creating Chunks'),
+                'chunking_complete': ('✅', 'Chunking Complete'),
                 'saving': ('💾', 'Saving Files'),
-                'indexing': ('🔍', 'Indexing for Search'),
                 'complete': ('🎉', 'Complete'),
                 'error': ('❌', 'Error'),
-                'uploaded': ('📤', 'Uploaded - Ready'),
-                'pending': ('⏳', 'Pending Upload')
+                'uploaded': ('📤', 'Uploaded'),
+                'pending': ('⏳', 'Pending')
             }
 
             current_stage = file_info.get('stage', 'unknown')
@@ -683,34 +800,38 @@ with tab2:
             with col2:
                 st.write(f"**{file_info.get('progress', 0):.0f}%**")
             with col3:
-                elapsed = file_info.get('elapsed_time', 0)
-                if elapsed > 0:
+                # Show elapsed time if available
+                start_time = file_info.get('start_time')
+                if start_time:
+                    if isinstance(start_time, str):
+                        # Convert string timestamp if needed
+                        try:
+                            start_time = datetime.fromisoformat(start_time)
+                        except:
+                            start_time = datetime.now()
+                    elapsed = (datetime.now() - start_time).total_seconds()
                     st.caption(f"⏱️ {elapsed:.1f}s elapsed")
 
-            # Details and special messaging
+            # REAL details from unstructured logging
             details = file_info.get('details', '')
             if details:
                 st.caption(f"💬 {details}")
 
             # Special alerts for long-running stages
-            if current_stage in ['extraction', 'table_detection']:
-                st.info("📊 **Table detection in progress** - This can take several minutes for complex documents with many tables...")
+            if current_stage == 'table_detection':
+                st.info("📊 **Table detection in progress** - This uses AI models and can take several minutes for complex documents...")
+            elif current_stage == 'extraction':
+                st.info("🔍 **High-resolution extraction** - Processing document layout and structure...")
             elif current_stage == 'chunking':
                 st.info("✂️ **Creating semantic chunks** - Breaking document into searchable sections...")
-            elif current_stage == 'indexing':
-                st.info("🔍 **Indexing for search** - Making content searchable...")
 
-            # Handle completion
+            # Handle completion and errors
             if current_stage == 'complete':
-                # Move to completed
                 st.session_state.completed_files[file_id] = file_info
                 del st.session_state.processing_files[file_id]
                 st.rerun()
-
-            # Handle errors
             elif current_stage == 'error':
                 st.error(f"❌ Processing failed: {details}")
-                # Move to completed with error status
                 file_info['status'] = 'error'
                 st.session_state.completed_files[file_id] = file_info
                 del st.session_state.processing_files[file_id]
@@ -718,10 +839,16 @@ with tab2:
 
             st.markdown("---")
 
-        # Auto-refresh for real-time updates every 2 seconds (instead of WebSocket)
+        # Smart refresh logic: Real-time via WebSocket or polling fallback
         if st.session_state.processing_files:
-            time.sleep(2)
-            st.rerun()
+            if websocket_handler.is_connected():
+                # WebSocket connected: minimal refresh rate
+                time.sleep(1)
+                st.rerun()
+            else:
+                # WebSocket disconnected: use polling
+                time.sleep(3)  # Slightly longer interval for polling
+                st.rerun()
 
     # Completed section
     if st.session_state.completed_files:
@@ -731,8 +858,13 @@ with tab2:
         for file_id, file_info in st.session_state.completed_files.items():
             if file_info.get('status') == 'error':
                 st.error(f"❌ **{file_info['name']}** - Processing failed!")
+                details = file_info.get('details', 'Unknown error')
+                st.caption(f"Error: {details}")
             else:
                 st.success(f"✅ **{file_info['name']}** - Successfully processed!")
+                # Show final stats if available
+                if file_info.get('details'):
+                    st.caption(f"Result: {file_info['details']}")
 
     # Manual indexing
     st.markdown("---")
@@ -756,7 +888,6 @@ with tab2:
 with tab3:
     st.header("📚 Document Library")
 
-    # Only load documents when this tab is active - no more sidebar performance hit!
     col1, col2 = st.columns([1, 4])
     with col1:
         if st.button("🔄 Refresh", type="primary"):
@@ -769,21 +900,19 @@ with tab3:
             key="doc_search"
         )
 
-    # Get document list (only when this tab is used)
+    # Get document list
     with st.spinner("Loading document library..."):
         docs_response = api_request("/documents", timeout=20)
 
     if docs_response and docs_response.get("documents"):
         all_file_paths = docs_response["documents"]
 
-        # Group files by their parent document (folder name)
+        # Group files by their parent document
         documents_by_source = {}
         for file_path in all_file_paths:
             path_obj = Path(file_path)
-            # Get the parent folder name (which should be the PDF name)
             parent_folder = path_obj.parent.name
 
-            # Skip if it's just "processed_markdown" (top level files)
             if parent_folder == "processed_markdown":
                 parent_folder = "Uncategorized"
 
@@ -792,22 +921,20 @@ with tab3:
 
             documents_by_source[parent_folder].append(file_path)
 
-        # Filter by search term (search both document names and file content)
+        # Filter by search term
         if search_docs:
             filtered_docs = {}
             search_lower = search_docs.lower()
             for doc_name, files in documents_by_source.items():
                 if search_lower in doc_name.lower():
-                    # Document name matches
                     filtered_docs[doc_name] = files
                 else:
-                    # Check if any files match
                     matching_files = [f for f in files if search_lower in Path(f).name.lower()]
                     if matching_files:
                         filtered_docs[doc_name] = matching_files
             documents_by_source = filtered_docs
 
-        # Categorize documents by type
+        # Categorize documents
         doc_categories = {
             "📘 Core Rulebooks": {},
             "📖 Supplements & Expansions": {},
@@ -839,20 +966,17 @@ with tab3:
         if search_docs:
             st.info(f"🔍 Showing {total_documents} documents matching '{search_docs}'")
 
-        # Display each category
+        # Display each category (same as before)
         for category_name, category_docs in doc_categories.items():
             if category_docs:
                 st.markdown(f"### {category_name}")
 
                 for doc_name, files in sorted(category_docs.items()):
                     with st.expander(f"📖 **{doc_name}** ({len(files)} chunks)"):
-
-                        # Document-level actions
                         col1, col2, col3, col4 = st.columns(4)
 
                         with col1:
                             if st.button(f"🎯 Search This Doc", key=f"search_doc_{doc_name}"):
-                                # Set filter and switch to query tab
                                 st.session_state.doc_filter = doc_name
                                 st.info(f"💡 Switch to Query tab - document filter is set to '{doc_name}'")
 
@@ -865,7 +989,6 @@ with tab3:
                                 st.session_state.show_chunks = doc_name
 
                         with col4:
-                            # Calculate estimated pages (rough estimate: 20 chunks per page)
                             estimated_pages = max(1, len(files) // 20)
                             st.caption(f"📄 ~{estimated_pages} pages")
 
@@ -873,9 +996,8 @@ with tab3:
                         if st.session_state.get('show_stats') == doc_name:
                             st.markdown("#### 📊 Document Statistics")
 
-                            # Basic stats
                             chunk_count = len(files)
-                            avg_chunk_size = "~500 words"  # Rough estimate
+                            avg_chunk_size = "~500 words"
 
                             stat_col1, stat_col2, stat_col3 = st.columns(3)
                             with stat_col1:
@@ -885,11 +1007,9 @@ with tab3:
                             with stat_col3:
                                 st.metric("Est. Pages", estimated_pages)
 
-                            # Top-level sections (based on chunk file names)
                             section_names = []
-                            for file_path in files[:10]:  # Sample first 10
+                            for file_path in files[:10]:
                                 chunk_name = Path(file_path).stem
-                                # Clean up chunk names for section detection
                                 clean_name = chunk_name.replace('_', ' ').title()
                                 section_names.append(clean_name[:30] + "..." if len(clean_name) > 30 else clean_name)
 
@@ -904,8 +1024,7 @@ with tab3:
                         if st.session_state.get('show_chunks') == doc_name:
                             st.markdown("#### 📄 Document Chunks")
 
-                            # Show chunks in a more organized way
-                            for i, file_path in enumerate(files[:20]):  # Limit to first 20
+                            for i, file_path in enumerate(files[:20]):
                                 chunk_name = Path(file_path).stem
                                 clean_name = chunk_name.replace('_', ' ').title()
 
@@ -932,7 +1051,6 @@ with tab3:
     else:
         st.info("📭 No documents indexed yet. Upload PDFs in the Upload tab to get started!")
 
-        # Show sample structure
         st.markdown("### 💡 How it works")
         st.markdown("""
         When you upload PDFs, they get processed into searchable chunks:
@@ -947,34 +1065,34 @@ with tab3:
 
 with tab4:
     st.header("Session Notes")
-    
+
     # Session note creator
     st.subheader("Create New Session Note")
-    
+
     col1, col2 = st.columns([3, 1])
     with col1:
         session_number = st.number_input("Session Number", min_value=1, value=1)
     with col2:
         session_date = st.date_input("Date")
-    
+
     session_title = st.text_input(
         "Session Title",
         placeholder="The Time We Blew Up the Renraku Lab"
     )
-    
+
     session_content = st.text_area(
         "Session Summary",
         placeholder="Write your session summary here...\n\nKey Events:\n- \n\nNPCs Met:\n- \n\nLoot Found:\n- ",
         height=300
     )
-    
+
     if st.button("💾 Save Session Note", type="primary"):
         if session_title and session_content:
             # Create markdown file
             filename = f"Session_{session_number:02d}_{session_title.replace(' ', '_')}.md"
             filepath = Path("data/processed_markdown/SessionLogs") / filename
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # Format content
             content = f"""# Session {session_number}: {session_title}
 Date: {session_date}
@@ -985,21 +1103,21 @@ Date: {session_date}
 ---
 *Generated by Shadowrun RAG Assistant*
 """
-            
+
             filepath.write_text(content, encoding='utf-8')
             st.success(f"✅ Session note saved as {filename}")
-            
+
             # Trigger indexing
             api_request("/index", method="POST", json={"force_reindex": False})
         else:
             st.error("Please fill in both title and content")
-    
+
     # Quick templates
     st.markdown("---")
     st.subheader("📋 Quick Templates")
-    
+
     template_cols = st.columns(2)
-    
+
     with template_cols[0]:
         if st.button("🎯 Combat Encounter Template"):
             st.session_state['template'] = """**Location:** 
@@ -1007,7 +1125,7 @@ Date: {session_date}
 **Tactics Used:** 
 **Outcome:** 
 **Loot:** """
-    
+
     with template_cols[1]:
         if st.button("🤝 Johnson Meeting Template"):
             st.session_state['template'] = """**Johnson Name:** 
@@ -1021,13 +1139,8 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center'>
-        <small>🎲 Shadowrun RAG Assistant v1.0 | Powered by Ollama & ChromaDB</small>
+        <small>🎲 Shadowrun RAG Assistant v2.0 | Real-time Progress Tracking | Powered by Ollama & ChromaDB</small>
     </div>
     """,
     unsafe_allow_html=True
 )
-
-# Initialize session state for query
-if 'query_text' in st.session_state:
-    st.session_state['query'] = st.session_state['query_text']
-    del st.session_state['query_text']

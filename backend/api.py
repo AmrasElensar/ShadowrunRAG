@@ -1,4 +1,4 @@
-"""FastAPI backend server with WebSocket progress tracking - FIXED VERSION."""
+"""FastAPI backend server with FIXED WebSocket progress tracking using global state."""
 import ollama
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,8 +16,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from .indexer import IncrementalIndexer
 from .retriever import Retriever
-# WATCHER DISABLED - was causing auto-processing
-# from .watcher import PDFWatcher
 from tools.pdf_processor import PDFProcessor
 
 logging.basicConfig(level=logging.INFO)
@@ -34,72 +32,106 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global progress tracking
-active_jobs: Dict[str, Dict] = {}
-websocket_connections: Set[WebSocket] = set()
+# GLOBAL progress tracking (NOT session-dependent)
+class GlobalProgressTracker:
+    """Global progress tracker that survives WebSocket disconnections."""
+
+    def __init__(self):
+        self.active_jobs: Dict[str, Dict] = {}
+        self.websocket_connections: Set[WebSocket] = set()
+        self.lock = asyncio.Lock()
+        logger.info("🔧 GlobalProgressTracker initialized")
+
+    async def update_progress(self, job_id: str, stage: str, progress: float, details: str = ""):
+        """Update progress and broadcast to ALL connected clients."""
+        progress_data = {
+            "job_id": job_id,
+            "stage": stage,
+            "progress": max(0, min(100, progress)),  # Clamp 0-100
+            "details": details,
+            "timestamp": time.time()
+        }
+
+        async with self.lock:
+            # Store globally (survives disconnections)
+            self.active_jobs[job_id] = progress_data
+
+        # Broadcast to ALL connected WebSocket clients
+        await self.broadcast_to_all(progress_data)
+
+        # Also log for debugging
+        logger.info(f"Progress [{job_id}]: {stage} ({progress}%) - {details}")
+
+    async def broadcast_to_all(self, message: dict):
+        """Broadcast message to all connected WebSocket clients."""
+        if not self.websocket_connections:
+            logger.debug("No WebSocket connections to broadcast to")
+            return
+
+        disconnected = set()
+        message_json = json.dumps(message)
+
+        logger.info(f"Broadcasting to {len(self.websocket_connections)} WebSocket clients")
+
+        for connection in list(self.websocket_connections):
+            try:
+                await connection.send_text(message_json)
+            except Exception as e:
+                logger.warning(f"Failed to send to WebSocket: {e}")
+                disconnected.add(connection)
+
+        # Clean up disconnected clients
+        self.websocket_connections.difference_update(disconnected)
+        if disconnected:
+            logger.info(f"Cleaned up {len(disconnected)} disconnected WebSocket clients")
+
+    async def add_connection(self, websocket: WebSocket):
+        """Add new WebSocket connection and send current progress."""
+        await websocket.accept()
+        self.websocket_connections.add(websocket)
+        logger.info(f"✅ WebSocket connected. Total connections: {len(self.websocket_connections)}")
+
+        # Send current active jobs to new connection
+        async with self.lock:
+            for job_data in self.active_jobs.values():
+                try:
+                    await websocket.send_text(json.dumps(job_data))
+                    logger.debug(f"Sent existing job data to new WebSocket: {job_data['job_id']}")
+                except:
+                    pass  # Connection might have closed immediately
+
+    def remove_connection(self, websocket: WebSocket):
+        """Remove WebSocket connection."""
+        self.websocket_connections.discard(websocket)
+        logger.info(f"❌ WebSocket disconnected. Remaining connections: {len(self.websocket_connections)}")
+
+    def get_job_status(self, job_id: str) -> Optional[Dict]:
+        """Get current job status (for polling fallback)."""
+        return self.active_jobs.get(job_id)
+
+    async def cleanup_job(self, job_id: str, delay: int = 30):
+        """Remove completed job after delay."""
+        await asyncio.sleep(delay)
+        async with self.lock:
+            if job_id in self.active_jobs:
+                del self.active_jobs[job_id]
+                logger.info(f"🧹 Cleaned up job: {job_id}")
+
+# Global tracker instance - Initialize immediately
+progress_tracker = GlobalProgressTracker()
 
 # Thread pool for CPU-intensive tasks
 executor = ThreadPoolExecutor(max_workers=2)
 
-# Global task tracking
-cleanup_tasks = set()
-
-class ProgressLogger:
-    """Custom logger that broadcasts progress via WebSocket."""
-
-    def __init__(self, job_id: str, filename: str):
-        self.job_id = job_id
-        self.filename = filename
-        self.start_time = time.time()
-
-    async def log_progress(self, stage: str, progress: float, details: str = ""):
-        """Log progress and broadcast to WebSocket clients."""
-        message = {
-            "job_id": self.job_id,
-            "filename": self.filename,
-            "stage": stage,
-            "progress": progress,
-            "details": details,
-            "elapsed_time": time.time() - self.start_time,
-            "timestamp": time.time()
-        }
-
-        # Store in active jobs
-        active_jobs[self.job_id] = message
-
-        # Broadcast to all WebSocket connections
-        disconnected = set()
-        for connection in websocket_connections:
-            try:
-                await connection.send_text(json.dumps(message))
-            except:
-                disconnected.add(connection)
-
-        # Clean up disconnected clients
-        websocket_connections.difference_update(disconnected)
-
-        # Also log normally
-        logger.info(f"Progress [{self.job_id}]: {stage} ({progress}%) - {details}")
-
-async def cleanup_job(job_id: str):
-    """Remove completed job from active tracking after delay."""
-    await asyncio.sleep(30)  # Keep visible for 30 seconds
-    if job_id in active_jobs:
-        del active_jobs[job_id]
-        logger.info(f"Cleaned up job: {job_id}")
-
-def schedule_cleanup(job_id: str):
-    """Schedule cleanup task and track it properly."""
-    task = asyncio.create_task(cleanup_job(job_id))
-    cleanup_tasks.add(task)
-    task.add_done_callback(cleanup_tasks.discard)  # Remove from set when done
-
 # Initialize components
 indexer = IncrementalIndexer()
 retriever = Retriever()
-processor = PDFProcessor()
-# WATCHER DISABLED - was causing the auto-processing issue
-# watcher = PDFWatcher(indexer=indexer, processor=processor)
+
+# Log initialization
+logger.info("🚀 FastAPI app initialized with components:")
+logger.info(f"   - GlobalProgressTracker: ✅")
+logger.info(f"   - IncrementalIndexer: ✅")
+logger.info(f"   - Retriever: ✅")
 
 class QueryRequest(BaseModel):
     question: str
@@ -120,43 +152,56 @@ class IndexRequest(BaseModel):
 @app.websocket("/ws/progress")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time progress updates."""
-    await websocket.accept()
-    websocket_connections.add(websocket)
-    logger.info(f"WebSocket connected. Total connections: {len(websocket_connections)}")
+    logger.info("🔌 New WebSocket connection attempt")
 
     try:
-        # Send current active jobs on connect
-        for job_id, progress in active_jobs.items():
-            await websocket.send_text(json.dumps(progress))
+        await progress_tracker.add_connection(websocket)
 
-        # Keep connection alive
+        # Keep connection alive and handle any incoming messages
         while True:
-            await websocket.receive_text()
+            try:
+                # Wait for any message (ping/pong, etc.)
+                await websocket.receive_text()
+            except WebSocketDisconnect:
+                logger.info("WebSocket client disconnected normally")
+                break
+            except Exception as e:
+                logger.warning(f"WebSocket receive error: {e}")
+                break
+
     except WebSocketDisconnect:
-        websocket_connections.remove(websocket)
-        logger.info(f"WebSocket disconnected. Remaining connections: {len(websocket_connections)}")
+        logger.info("WebSocket disconnected during handshake")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+    finally:
+        progress_tracker.remove_connection(websocket)
 
 @app.get("/")
 def root():
     """Health check."""
-    return {"status": "online", "service": "Shadowrun RAG API"}
+    return {
+        "status": "online",
+        "service": "Shadowrun RAG API",
+        "websocket_connections": len(progress_tracker.websocket_connections),
+        "active_jobs": len(progress_tracker.active_jobs)
+    }
 
-async def process_pdf_with_progress_async(pdf_path: str, job_id: str):
-    """Process PDF with progress tracking in a separate thread."""
-    progress_logger = ProgressLogger(job_id, Path(pdf_path).name)
+async def process_pdf_with_real_progress(pdf_path: str, job_id: str):
+    """Process PDF with REAL progress tracking from unstructured logs."""
 
     def cpu_intensive_processing():
-        """Run the actual PDF processing in a thread."""
+        """Run PDF processing in thread with progress tracking."""
         try:
-            # Create a new processor instance for this thread
-            thread_processor = PDFProcessor()
+            # Create processor with progress callback
+            processor = PDFProcessor(progress_callback=lambda stage, progress, details:
+                asyncio.create_task(progress_tracker.update_progress(job_id, stage, progress, details))
+            )
 
-            # Process the PDF (this is the slow part)
-            result = thread_processor.process_pdf(pdf_path, force_reparse=True)
+            # Process the PDF (this hooks into unstructured logging)
+            result = processor.process_pdf(pdf_path, force_reparse=True)
 
-            # Trigger indexing after processing
-            thread_indexer = IncrementalIndexer()
-            thread_indexer.index_directory("data/processed_markdown")
+            # Index the results
+            indexer.index_directory("data/processed_markdown")
 
             return result
 
@@ -165,34 +210,29 @@ async def process_pdf_with_progress_async(pdf_path: str, job_id: str):
             raise e
 
     try:
-        # Only send real progress updates, not fake ones
-        await progress_logger.log_progress("starting", 5, f"Starting PDF processing...")
+        await progress_tracker.update_progress(job_id, "starting", 5, "Initializing PDF processing...")
 
-        # Run the CPU-intensive work in the thread pool
-        # All the real progress will come from the PDFProcessor logs
+        # Run CPU-intensive work in thread pool
         result = await asyncio.get_event_loop().run_in_executor(
             executor, cpu_intensive_processing
         )
 
-        # Only update when we're actually done
-        await progress_logger.log_progress("complete", 100, f"Processing complete! Created {len(result)} files.")
+        await progress_tracker.update_progress(job_id, "complete", 100, f"Processing complete! Created {len(result)} files.")
 
-        # Clean up from active jobs after a delay - properly scheduled
-        schedule_cleanup(job_id)
+        # Schedule cleanup
+        asyncio.create_task(progress_tracker.cleanup_job(job_id))
 
         return result
 
     except Exception as e:
-        await progress_logger.log_progress("error", -1, f"Processing failed: {str(e)}")
+        await progress_tracker.update_progress(job_id, "error", -1, f"Processing failed: {str(e)}")
         logger.error(f"Processing failed: {e}")
         logger.error(traceback.format_exc())
         raise
 
 @app.post("/upload")
-async def upload_pdf_with_progress(
-    file: UploadFile = File(...)
-):
-    """Upload and process a PDF with WebSocket progress tracking."""
+async def upload_pdf_with_progress(file: UploadFile = File(...)):
+    """Upload and process a PDF with real-time progress tracking."""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(400, "Only PDF files are allowed")
 
@@ -200,34 +240,30 @@ async def upload_pdf_with_progress(
     job_id = f"{file.filename}_{int(time.time() * 1000)}"
 
     try:
-        # Save file quickly and return immediately
+        # Save file quickly
         save_path = Path("data/raw_pdfs") / file.filename
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Read and save file
         content = await file.read()
         save_path.write_bytes(content)
 
-        # Start processing in completely separate thread to avoid blocking
+        # Start processing in background thread
         def start_processing():
-            # Create new event loop for this thread
             asyncio.set_event_loop(asyncio.new_event_loop())
             loop = asyncio.get_event_loop()
             try:
-                loop.run_until_complete(process_pdf_with_progress_async(str(save_path), job_id))
+                loop.run_until_complete(process_pdf_with_real_progress(str(save_path), job_id))
             finally:
                 loop.close()
 
-        # Start in daemon thread
         thread = threading.Thread(target=start_processing, daemon=True)
         thread.start()
 
-        # Return immediately - don't wait for processing
         return {
             "job_id": job_id,
             "filename": file.filename,
             "status": "processing",
-            "message": "PDF uploaded successfully. Processing started in background."
+            "message": "PDF uploaded. Processing started with real-time progress tracking."
         }
 
     except Exception as e:
@@ -236,9 +272,10 @@ async def upload_pdf_with_progress(
 
 @app.get("/job/{job_id}")
 async def get_job_status(job_id: str):
-    """Get current status of a processing job."""
-    if job_id in active_jobs:
-        return active_jobs[job_id]
+    """Get current status of a processing job (polling fallback)."""
+    status = progress_tracker.get_job_status(job_id)
+    if status:
+        return status
     else:
         return {"status": "not_found", "message": "Job not found or completed"}
 
@@ -246,7 +283,7 @@ async def get_job_status(job_id: str):
 async def query(request: QueryRequest):
     """Query the RAG system with full context."""
     try:
-        # Build metadata filter - FIXED: Only add non-empty conditions
+        # Build metadata filter
         where_filter = {}
 
         if request.filter_source and request.filter_source.strip():
@@ -256,7 +293,7 @@ async def query(request: QueryRequest):
         if request.filter_subsection and request.filter_subsection.strip():
             where_filter["Subsection"] = request.filter_subsection
 
-        # Role-based fallback (only if no manual section)
+        # Role-based fallback
         role_to_section = {
             "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
             "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Technomancy"
@@ -266,15 +303,13 @@ async def query(request: QueryRequest):
                 "Section" not in where_filter):
             where_filter["Section"] = role_to_section[request.character_role]
 
-        # Pass None if empty dict
         final_filter = where_filter if where_filter else None
 
-        # Query retriever
         results = retriever.query(
             question=request.question,
             n_results=request.n_results,
             query_type=request.query_type,
-            where_filter=final_filter,  # Fixed: Use final_filter
+            where_filter=final_filter,
             character_role=request.character_role,
             character_stats=request.character_stats,
             edition=request.edition
@@ -285,12 +320,11 @@ async def query(request: QueryRequest):
         logger.error(f"Query error: {e}", exc_info=True)
         raise HTTPException(500, str(e))
 
-
 @app.post("/query_stream")
 async def query_stream(request: QueryRequest):
     """Stream the answer and include full metadata at the end."""
     try:
-        # Build filter - FIXED: Only add non-empty conditions
+        # Build filter
         where_filter = {}
 
         if request.filter_source and request.filter_source.strip():
@@ -300,22 +334,20 @@ async def query_stream(request: QueryRequest):
         if request.filter_subsection and request.filter_subsection.strip():
             where_filter["Subsection"] = request.filter_subsection
 
-        # Role-based section filter (only if no manual section set)
         role_to_section = {
             "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
             "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Technomancy"
         }
         if (request.character_role and
                 request.character_role in role_to_section and
-                "Section" not in where_filter):  # Don't override manual section
+                "Section" not in where_filter):
             where_filter["Section"] = role_to_section[request.character_role]
 
-        # Pass None if empty dict (ChromaDB requirement)
         final_filter = where_filter if where_filter else None
 
         def generate():
             try:
-                # Get search results first (non-streaming)
+                # Get search results first
                 search_results = retriever.search(
                     question=request.question,
                     n_results=request.n_results,
@@ -326,7 +358,7 @@ async def query_stream(request: QueryRequest):
                     yield "No relevant information found in the indexed documents."
                     return
 
-                # Stream the actual generation (REAL streaming)
+                # Stream the generation
                 for token in retriever.query_stream(
                         question=request.question,
                         n_results=request.n_results,
@@ -339,7 +371,7 @@ async def query_stream(request: QueryRequest):
                 ):
                     yield token
 
-                # Send metadata after streaming completes
+                # Send metadata after streaming
                 metadata_packet = {
                     "sources": list({meta.get('source', 'Unknown') for meta in search_results['metadatas']}),
                     "chunks": search_results['documents'],
@@ -378,7 +410,6 @@ async def index_documents(request: IndexRequest):
 async def list_documents():
     """List all indexed documents."""
     try:
-        # Get unique sources from ChromaDB
         results = retriever.collection.get()
         sources = set()
 
@@ -391,7 +422,6 @@ async def list_documents():
         logger.error(f"Error listing documents: {e}")
         return {"documents": []}
 
-
 @app.get("/models")
 async def list_models():
     """List available Ollama models."""
@@ -402,10 +432,10 @@ async def list_models():
         models = []
         for model in models_response.get('models', []):
             model_name = (
-                    model.get('name') or
-                    model.get('model') or
-                    model.get('id') or
-                    str(model)
+                model.get('name') or
+                model.get('model') or
+                model.get('id') or
+                str(model)
             )
             if model_name:
                 models.append(model_name)
@@ -431,26 +461,13 @@ async def status():
             "status": "online",
             "indexed_documents": len(sources),
             "indexed_chunks": doc_count,
-            "active_jobs": len(active_jobs),
-            "websocket_connections": len(websocket_connections),
+            "active_jobs": len(progress_tracker.active_jobs),
+            "websocket_connections": len(progress_tracker.websocket_connections),
             "models_available": [m['name'] for m in ollama.list().get('models', [])]
         }
     except Exception as e:
         logger.error(f"Status check failed: {e}")
         return {"status": "degraded", "error": str(e)}
-
-@app.get("/prompts")
-async def list_prompts():
-    """List available prompt templates (placeholder)."""
-    return {
-        "prompts": [
-            "general_rule",
-            "combat_query",
-            "magic_query",
-            "matrix_query",
-            "character_action"
-        ]
-    }
 
 if __name__ == "__main__":
     import uvicorn
