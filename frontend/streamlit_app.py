@@ -145,20 +145,24 @@ def get_available_models():
     """Fetch available models with caching."""
     try:
         response = api_request("/models", timeout=5)  # Add timeout
-        return response.get("models", ["llama3"]) if response else ["llama3"]
+        models = response.get("models", ["llama3"]) if response else ["llama3"]
+        # Ensure we always return at least one model to prevent empty selectbox
+        return models if models else ["llama3"]
     except Exception as e:
         logger.warning(f"Failed to fetch models: {e}")
-        return ["llama3", "mixtral", "codellama"]  # Fallback
+        return ["llama3"]  # Always return a list with at least one item
 
 @st.cache_data(ttl=30)  # Cache for 30 seconds
 def get_available_documents():
     """Fetch available documents with caching."""
     try:
-        response = api_request("/documents", timeout=5)  # Add timeout
-        return response.get("documents", []) if response else []
+        # Longer timeout for documents as it might need to query ChromaDB
+        response = api_request("/documents", timeout=15)  # Increased from 5 to 15 seconds
+        docs = response.get("documents", []) if response else []
+        return docs if isinstance(docs, list) else []  # Ensure it's always a list
     except Exception as e:
         logger.warning(f"Failed to fetch documents: {e}")
-        return []  # Fallback
+        return []  # Always return a list
 
 def api_request(endpoint: str, method: str = "GET", timeout: int = 10, **kwargs):
     """Make API request with error handling and timeout."""
@@ -181,10 +185,13 @@ with st.sidebar:
 
     # Cached model selection - only hits API every 30 seconds
     available_models = get_available_models()
+
+    # Initialize the selectbox with a key to prevent state errors
     selected_model = st.selectbox(
         "LLM Model",
         available_models,
-        index=0
+        index=0,
+        key="model_selectbox"  # Add explicit key
     )
 
     # Query settings
@@ -223,14 +230,23 @@ with st.sidebar:
     edition = None if edition == "None" else edition
 
     # Cached document filter - only hits API every 30 seconds
-    documents = get_available_documents()
-    filter_source = None
-    if documents:
-        filter_source = st.selectbox(
-            "Filter by Source (optional)",
-            ["All"] + documents
-        )
-        filter_source = None if filter_source == "All" else filter_source
+    try:
+        documents = get_available_documents()
+        filter_source = None
+        if documents:
+            filter_source = st.selectbox(
+                "Filter by Source (optional)",
+                ["All"] + documents,
+                key="source_filter_selectbox"  # Add explicit key
+            )
+            filter_source = None if filter_source == "All" else filter_source
+        else:
+            st.caption("⚠️ Document list unavailable (API timeout)")
+            filter_source = None
+    except Exception as e:
+        st.caption("⚠️ Document filter unavailable")
+        logger.error(f"Document filter error: {e}")
+        filter_source = None
 
     # Section filter (static - no API call)
     section_options = ["All", "Combat", "Matrix", "Magic", "Gear", "Character Creation", "Riggers", "Technomancy"]
@@ -423,40 +439,22 @@ with tab2:
             st.session_state.uploader_key += 1
 
         elif action['type'] == 'process_all':
-            upload_errors = []
-
+            # IMMEDIATELY move all files to processing view
             for file_info in st.session_state.ready_files:
-                try:
-                    files = {"file": (file_info['name'], file_info['file'].getvalue(), "application/pdf")}
-                    response = requests.post(f"{API_URL}/upload", files=files)
+                st.session_state.processing_files[file_info['id']] = {
+                    'name': file_info['name'],
+                    'size': file_info['size'],
+                    'job_id': None,  # Will be set after upload
+                    'stage': 'preparing',
+                    'progress': 0,
+                    'details': 'Preparing to upload...',
+                    'start_time': datetime.now(),
+                    'file_data': file_info['file']  # Store file data for later upload
+                }
 
-                    if response.status_code == 200:
-                        result = response.json()
-                        job_id = result['job_id']
-
-                        st.session_state.processing_files[file_info['id']] = {
-                            'name': file_info['name'],
-                            'size': file_info['size'],
-                            'job_id': job_id,
-                            'stage': 'uploading',
-                            'progress': 0,
-                            'details': 'Upload complete, processing started...',
-                            'start_time': datetime.now()
-                        }
-
-                        st.success(f"✅ {file_info['name']} uploaded! Job ID: {job_id}")
-                    else:
-                        upload_errors.append(file_info)
-                        st.error(f"❌ Upload failed for {file_info['name']}: {response.text}")
-
-                except Exception as e:
-                    upload_errors.append(file_info)
-                    st.error(f"❌ Upload error for {file_info['name']}: {str(e)}")
-
-            # Keep failed uploads in ready_files
-            st.session_state.ready_files = upload_errors
-            if not st.session_state.ready_files:
-                st.session_state.uploader_key += 1
+            # Clear ready files
+            st.session_state.ready_files = []
+            st.session_state.uploader_key += 1
 
         elif action['type'] == 'remove_file':
             file_id = action['file_id']
@@ -469,37 +467,84 @@ with tab2:
             file_info = next((f for f in st.session_state.ready_files if f['id'] == file_id), None)
 
             if file_info:
-                try:
-                    files = {"file": (file_info['name'], file_info['file'].getvalue(), "application/pdf")}
-                    response = requests.post(f"{API_URL}/upload", files=files)
+                # IMMEDIATELY move to processing view (no upload yet)
+                st.session_state.processing_files[file_id] = {
+                    'name': file_info['name'],
+                    'size': file_info['size'],
+                    'job_id': None,  # Will be set after upload
+                    'stage': 'preparing',
+                    'progress': 0,
+                    'details': 'Preparing to upload...',
+                    'start_time': datetime.now(),
+                    'file_data': file_info['file']  # Store file data for later upload
+                }
 
-                    if response.status_code == 200:
-                        result = response.json()
-                        job_id = result['job_id']
-
-                        # Store processing info with job ID
-                        st.session_state.processing_files[file_id] = {
-                            'name': file_info['name'],
-                            'size': file_info['size'],
-                            'job_id': job_id,
-                            'stage': 'uploading',
-                            'progress': 0,
-                            'details': 'Upload complete, processing started...',
-                            'start_time': datetime.now()
-                        }
-
-                        st.success(f"✅ {file_info['name']} uploaded! Job ID: {job_id}")
-                        st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
-                        if not st.session_state.ready_files:
-                            st.session_state.uploader_key += 1
-                    else:
-                        st.error(f"❌ Upload failed: {response.text}")
-
-                except Exception as e:
-                    st.error(f"❌ Upload error: {str(e)}")
+                # Remove from ready files
+                st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
+                if not st.session_state.ready_files:
+                    st.session_state.uploader_key += 1
 
         del st.session_state.action
         st.rerun()  # Single rerun after all actions
+
+    # Handle uploads for files in processing that don't have job_ids yet
+    files_to_upload = [
+        (file_id, file_info) for file_id, file_info in st.session_state.processing_files.items()
+        if file_info.get('job_id') is None and file_info.get('stage') == 'preparing'
+    ]
+
+    if files_to_upload:
+        # Upload files that are ready
+        for file_id, file_info in files_to_upload:
+            try:
+                # Update status to uploading
+                st.session_state.processing_files[file_id]['stage'] = 'uploading'
+                st.session_state.processing_files[file_id]['details'] = 'Uploading to server...'
+
+                # Perform upload
+                files = {"file": (file_info['name'], file_info['file_data'].getvalue(), "application/pdf")}
+                response = requests.post(f"{API_URL}/upload", files=files, timeout=30)
+
+                if response.status_code == 200:
+                    result = response.json()
+                    job_id = result['job_id']
+
+                    # Update with job ID - now WebSocket can track it
+                    st.session_state.processing_files[file_id].update({
+                        'job_id': job_id,
+                        'stage': 'uploaded',
+                        'progress': 5,
+                        'details': 'Upload complete, processing started...'
+                    })
+
+                    # Clean up file data to save memory
+                    del st.session_state.processing_files[file_id]['file_data']
+
+                    st.success(f"✅ {file_info['name']} uploaded! Job ID: {job_id}")
+                else:
+                    st.error(f"❌ Upload failed for {file_info['name']}: {response.text}")
+                    # Move back to ready files
+                    st.session_state.ready_files.append({
+                        'id': file_id,
+                        'name': file_info['name'],
+                        'size': file_info['size'],
+                        'file': file_info['file_data']
+                    })
+                    del st.session_state.processing_files[file_id]
+
+            except Exception as e:
+                st.error(f"❌ Upload error for {file_info['name']}: {str(e)}")
+                # Move back to ready files
+                st.session_state.ready_files.append({
+                    'id': file_id,
+                    'name': file_info['name'],
+                    'size': file_info['size'],
+                    'file': file_info['file_data']
+                })
+                del st.session_state.processing_files[file_id]
+
+        # Rerun to update the UI with upload results
+        st.rerun()
 
     # File uploader
     uploaded_files = st.file_uploader(
