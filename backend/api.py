@@ -1,4 +1,4 @@
-"""FastAPI backend server with WebSocket progress tracking."""
+"""FastAPI backend server with WebSocket progress tracking - FIXED VERSION."""
 import ollama
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,9 +12,12 @@ import asyncio
 import json
 import time
 import traceback
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from .indexer import IncrementalIndexer
 from .retriever import Retriever
-from .watcher import PDFWatcher
+# WATCHER DISABLED - was causing auto-processing
+# from .watcher import PDFWatcher
 from tools.pdf_processor import PDFProcessor
 
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +37,12 @@ app.add_middleware(
 # Global progress tracking
 active_jobs: Dict[str, Dict] = {}
 websocket_connections: Set[WebSocket] = set()
+
+# Thread pool for CPU-intensive tasks
+executor = ThreadPoolExecutor(max_workers=2)
+
+# Global task tracking
+cleanup_tasks = set()
 
 class ProgressLogger:
     """Custom logger that broadcasts progress via WebSocket."""
@@ -72,11 +81,25 @@ class ProgressLogger:
         # Also log normally
         logger.info(f"Progress [{self.job_id}]: {stage} ({progress}%) - {details}")
 
+async def cleanup_job(job_id: str):
+    """Remove completed job from active tracking after delay."""
+    await asyncio.sleep(30)  # Keep visible for 30 seconds
+    if job_id in active_jobs:
+        del active_jobs[job_id]
+        logger.info(f"Cleaned up job: {job_id}")
+
+def schedule_cleanup(job_id: str):
+    """Schedule cleanup task and track it properly."""
+    task = asyncio.create_task(cleanup_job(job_id))
+    cleanup_tasks.add(task)
+    task.add_done_callback(cleanup_tasks.discard)  # Remove from set when done
+
 # Initialize components
 indexer = IncrementalIndexer()
 retriever = Retriever()
 processor = PDFProcessor()
-watcher = PDFWatcher(indexer=indexer, processor=processor)
+# WATCHER DISABLED - was causing the auto-processing issue
+# watcher = PDFWatcher(indexer=indexer, processor=processor)
 
 class QueryRequest(BaseModel):
     question: str
@@ -118,44 +141,44 @@ def root():
     """Health check."""
     return {"status": "online", "service": "Shadowrun RAG API"}
 
-async def process_pdf_with_progress(pdf_path: str, job_id: str):
-    """Process PDF with progress tracking using existing PDFProcessor."""
+async def process_pdf_with_progress_async(pdf_path: str, job_id: str):
+    """Process PDF with progress tracking in a separate thread."""
     progress_logger = ProgressLogger(job_id, Path(pdf_path).name)
 
+    def cpu_intensive_processing():
+        """Run the actual PDF processing in a thread."""
+        try:
+            # Create a new processor instance for this thread
+            thread_processor = PDFProcessor()
+
+            # Process the PDF (this is the slow part)
+            result = thread_processor.process_pdf(pdf_path, force_reparse=True)
+
+            # Trigger indexing after processing
+            thread_indexer = IncrementalIndexer()
+            thread_indexer.index_directory("data/processed_markdown")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"PDF processing failed: {e}")
+            raise e
+
     try:
-        await progress_logger.log_progress("starting", 5, f"Starting processing...")
+        # Only send real progress updates, not fake ones
+        await progress_logger.log_progress("starting", 5, f"Starting PDF processing...")
 
-        # Use existing PDFProcessor but hook into its stages
-        result = processor.process_pdf(pdf_path, force_reparse=True)
+        # Run the CPU-intensive work in the thread pool
+        # All the real progress will come from the PDFProcessor logs
+        result = await asyncio.get_event_loop().run_in_executor(
+            executor, cpu_intensive_processing
+        )
 
-        # Since we can't easily modify the existing processor without major changes,
-        # we'll simulate progress based on typical processing stages
-        await progress_logger.log_progress("reading", 10, "Reading PDF file...")
-        await asyncio.sleep(0.5)
-
-        await progress_logger.log_progress("extraction", 20, "Extracting text and layout...")
-        await asyncio.sleep(1)
-
-        await progress_logger.log_progress("table_detection", 30, "Analyzing tables and structure...")
-        await asyncio.sleep(2)  # Simulate the long table detection
-
-        await progress_logger.log_progress("cleaning", 60, "Cleaning and filtering content...")
-        await asyncio.sleep(0.5)
-
-        await progress_logger.log_progress("chunking", 75, "Creating semantic chunks...")
-        await asyncio.sleep(1)
-
-        await progress_logger.log_progress("saving", 90, "Saving processed content...")
-        await asyncio.sleep(0.5)
-
-        # Trigger indexing
-        indexer.index_directory("data/processed_markdown")
-        await progress_logger.log_progress("indexing", 95, "Indexing for search...")
-
+        # Only update when we're actually done
         await progress_logger.log_progress("complete", 100, f"Processing complete! Created {len(result)} files.")
 
-        # Clean up from active jobs after a delay
-        asyncio.create_task(cleanup_job(job_id))
+        # Clean up from active jobs after a delay - properly scheduled
+        schedule_cleanup(job_id)
 
         return result
 
@@ -165,41 +188,51 @@ async def process_pdf_with_progress(pdf_path: str, job_id: str):
         logger.error(traceback.format_exc())
         raise
 
-async def cleanup_job(job_id: str):
-    """Remove completed job from active tracking after delay."""
-    await asyncio.sleep(30)  # Keep visible for 30 seconds
-    if job_id in active_jobs:
-        del active_jobs[job_id]
-        logger.info(f"Cleaned up job: {job_id}")
-
 @app.post("/upload")
 async def upload_pdf_with_progress(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
-    """Upload and process a PDF with progress tracking."""
+    """Upload and process a PDF with WebSocket progress tracking."""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(400, "Only PDF files are allowed")
 
     # Generate unique job ID
     job_id = f"{file.filename}_{int(time.time() * 1000)}"
 
-    # Save to raw_pdfs directory
-    save_path = Path("data/raw_pdfs") / file.filename
-    save_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Save file quickly and return immediately
+        save_path = Path("data/raw_pdfs") / file.filename
+        save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with save_path.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        # Read and save file
+        content = await file.read()
+        save_path.write_bytes(content)
 
-    # Start processing with progress tracking
-    background_tasks.add_task(process_pdf_with_progress, str(save_path), job_id)
+        # Start processing in completely separate thread to avoid blocking
+        def start_processing():
+            # Create new event loop for this thread
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            loop = asyncio.get_event_loop()
+            try:
+                loop.run_until_complete(process_pdf_with_progress_async(str(save_path), job_id))
+            finally:
+                loop.close()
 
-    return {
-        "job_id": job_id,
-        "filename": file.filename,
-        "status": "processing",
-        "message": "PDF uploaded and processing started with progress tracking"
-    }
+        # Start in daemon thread
+        thread = threading.Thread(target=start_processing, daemon=True)
+        thread.start()
+
+        # Return immediately - don't wait for processing
+        return {
+            "job_id": job_id,
+            "filename": file.filename,
+            "status": "processing",
+            "message": "PDF uploaded successfully. Processing started in background."
+        }
+
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        raise HTTPException(500, f"Upload failed: {str(e)}")
 
 @app.get("/job/{job_id}")
 async def get_job_status(job_id: str):
@@ -366,17 +399,13 @@ async def list_models():
         import ollama
         models_response = ollama.list()
 
-        # Debug: Log the actual response structure
-        logger.info(f"Ollama models response: {models_response}")
-
         models = []
         for model in models_response.get('models', []):
-            # Try different possible key names for model name
             model_name = (
                     model.get('name') or
                     model.get('model') or
                     model.get('id') or
-                    str(model)  # fallback to string representation
+                    str(model)
             )
             if model_name:
                 models.append(model_name)
@@ -385,8 +414,6 @@ async def list_models():
 
     except Exception as e:
         logger.error(f"Error listing models: {e}")
-        # Include the actual error details for debugging
-        logger.error(f"Error type: {type(e).__name__}")
         return {"models": ["llama3", "mistral", "codellama"], "error": str(e)}
 
 @app.get("/status")

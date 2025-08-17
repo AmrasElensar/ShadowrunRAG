@@ -94,8 +94,14 @@ def on_progress_message(ws, message):
     try:
         data = json.loads(message)
         job_id = data['job_id']
-        st.session_state.job_progress[job_id] = data
-        logger.info(f"Progress update: {job_id} - {data['stage']} ({data['progress']}%)")
+
+        # Check if session state exists and is accessible
+        if hasattr(st, 'session_state') and hasattr(st.session_state, 'job_progress'):
+            st.session_state.job_progress[job_id] = data
+            logger.info(f"Progress update: {job_id} - {data['stage']} ({data['progress']}%)")
+        else:
+            logger.warning(f"Session state not accessible for progress update: {job_id}")
+
     except Exception as e:
         logger.error(f"Progress message error: {e}")
 
@@ -229,25 +235,6 @@ with st.sidebar:
     )
     edition = None if edition == "None" else edition
 
-    # Cached document filter - only hits API every 30 seconds
-    try:
-        documents = get_available_documents()
-        filter_source = None
-        if documents:
-            filter_source = st.selectbox(
-                "Filter by Source (optional)",
-                ["All"] + documents,
-                key="source_filter_selectbox"  # Add explicit key
-            )
-            filter_source = None if filter_source == "All" else filter_source
-        else:
-            st.caption("⚠️ Document list unavailable (API timeout)")
-            filter_source = None
-    except Exception as e:
-        st.caption("⚠️ Document filter unavailable")
-        logger.error(f"Document filter error: {e}")
-        filter_source = None
-
     # Section filter (static - no API call)
     section_options = ["All", "Combat", "Matrix", "Magic", "Gear", "Character Creation", "Riggers", "Technomancy"]
     filter_section = st.selectbox(
@@ -263,6 +250,9 @@ with st.sidebar:
         placeholder="e.g., Hacking, Spellcasting, Initiative"
     )
     filter_subsection = None if filter_subsection.strip() == "" else filter_subsection
+
+    # Note: Document source filter moved to Documents tab
+    filter_source = None
 
 # Main interface tabs
 tab1, tab2, tab3, tab4 = st.tabs(["💬 Query", "📤 Upload", "📚 Documents", "📝 Session Notes"])
@@ -411,12 +401,43 @@ with tab1:
 with tab2:
     st.header("Upload PDFs")
 
-    # CSS to hide file uploader file list
+    # CSS to hide file uploader file list - Using stable selectors
     st.markdown("""
     <style>
-    .uploadedFile { display: none !important; }
-    div[data-testid="fileUploader"] section[data-testid="fileDropzoneInstructions"] + div { display: none !important; }
-    .uploadedFileData { display: none !important; }
+    /* Target the file list container directly - more reliable approach */
+    div[data-testid="stFileUploader"] > div:last-child {
+        display: none !important;
+    }
+    
+    /* Alternative: Hide any element containing uploaded file data */
+    div[data-testid="stFileUploader"] ul {
+        display: none !important;
+    }
+    
+    /* Hide individual file items */
+    .stFileUploaderFile {
+        display: none !important;
+    }
+    
+    /* Hide file data sections */
+    div[data-testid="stFileUploaderFile"] {
+        display: none !important;
+    }
+    
+    /* Target by structure: file uploader > last div (which contains the file list) */
+    .stFileUploader > div:last-of-type {
+        display: none !important;
+    }
+    
+    /* Hide elements with file names */
+    div[data-testid="stFileUploaderFileName"] {
+        display: none !important;
+    }
+    
+    /* Hide delete buttons */
+    div[data-testid="stFileUploaderDeleteBtn"] {
+        display: none !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -440,17 +461,26 @@ with tab2:
 
         elif action['type'] == 'process_all':
             # IMMEDIATELY move all files to processing view
+            st.session_state.upload_queue = st.session_state.get('upload_queue', [])
+
             for file_info in st.session_state.ready_files:
                 st.session_state.processing_files[file_info['id']] = {
                     'name': file_info['name'],
                     'size': file_info['size'],
-                    'job_id': None,  # Will be set after upload
+                    'job_id': 'pending',  # Special marker
                     'stage': 'preparing',
                     'progress': 0,
                     'details': 'Preparing to upload...',
-                    'start_time': datetime.now(),
-                    'file_data': file_info['file']  # Store file data for later upload
+                    'start_time': datetime.now()
                 }
+
+                # Queue for upload
+                st.session_state.upload_queue.append({
+                    'file_id': file_info['id'],
+                    'name': file_info['name'],
+                    'file_data': file_info['file'].getvalue(),
+                    'attempt': 0
+                })
 
             # Clear ready files
             st.session_state.ready_files = []
@@ -471,13 +501,21 @@ with tab2:
                 st.session_state.processing_files[file_id] = {
                     'name': file_info['name'],
                     'size': file_info['size'],
-                    'job_id': None,  # Will be set after upload
+                    'job_id': 'pending',  # Special marker
                     'stage': 'preparing',
                     'progress': 0,
                     'details': 'Preparing to upload...',
-                    'start_time': datetime.now(),
-                    'file_data': file_info['file']  # Store file data for later upload
+                    'start_time': datetime.now()
                 }
+
+                # Queue the upload for background processing
+                st.session_state.upload_queue = st.session_state.get('upload_queue', [])
+                st.session_state.upload_queue.append({
+                    'file_id': file_id,
+                    'name': file_info['name'],
+                    'file_data': file_info['file'].getvalue(),
+                    'attempt': 0
+                })
 
                 # Remove from ready files
                 st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
@@ -487,29 +525,29 @@ with tab2:
         del st.session_state.action
         st.rerun()  # Single rerun after all actions
 
-    # Handle uploads for files in processing that don't have job_ids yet
-    files_to_upload = [
-        (file_id, file_info) for file_id, file_info in st.session_state.processing_files.items()
-        if file_info.get('job_id') is None and file_info.get('stage') == 'preparing'
-    ]
+    # Process upload queue (one file per page load to avoid blocking)
+    if 'upload_queue' in st.session_state and st.session_state.upload_queue:
+        # Only process ONE upload per page load to keep UI responsive
+        upload_item = st.session_state.upload_queue.pop(0)
+        file_id = upload_item['file_id']
 
-    if files_to_upload:
-        # Upload files that are ready
-        for file_id, file_info in files_to_upload:
+        if file_id in st.session_state.processing_files:
             try:
-                # Update status to uploading
+                # Update status
                 st.session_state.processing_files[file_id]['stage'] = 'uploading'
-                st.session_state.processing_files[file_id]['details'] = 'Uploading to server...'
+                st.session_state.processing_files[file_id]['details'] = f"Uploading {upload_item['name']}..."
 
-                # Perform upload
-                files = {"file": (file_info['name'], file_info['file_data'].getvalue(), "application/pdf")}
+                # Perform upload with longer timeout since we're only uploading, not processing
+                files = {"file": (upload_item['name'], upload_item['file_data'], "application/pdf")}
+
+                # Upload should be fast now - only file transfer, processing happens async
                 response = requests.post(f"{API_URL}/upload", files=files, timeout=30)
 
                 if response.status_code == 200:
                     result = response.json()
                     job_id = result['job_id']
 
-                    # Update with job ID - now WebSocket can track it
+                    # Update with real job ID
                     st.session_state.processing_files[file_id].update({
                         'job_id': job_id,
                         'stage': 'uploaded',
@@ -517,34 +555,18 @@ with tab2:
                         'details': 'Upload complete, processing started...'
                     })
 
-                    # Clean up file data to save memory
-                    del st.session_state.processing_files[file_id]['file_data']
-
-                    st.success(f"✅ {file_info['name']} uploaded! Job ID: {job_id}")
+                    st.success(f"✅ {upload_item['name']} uploaded! Job ID: {job_id}")
                 else:
-                    st.error(f"❌ Upload failed for {file_info['name']}: {response.text}")
-                    # Move back to ready files
-                    st.session_state.ready_files.append({
-                        'id': file_id,
-                        'name': file_info['name'],
-                        'size': file_info['size'],
-                        'file': file_info['file_data']
-                    })
+                    st.error(f"❌ Upload failed for {upload_item['name']}: {response.text}")
                     del st.session_state.processing_files[file_id]
 
             except Exception as e:
-                st.error(f"❌ Upload error for {file_info['name']}: {str(e)}")
-                # Move back to ready files
-                st.session_state.ready_files.append({
-                    'id': file_id,
-                    'name': file_info['name'],
-                    'size': file_info['size'],
-                    'file': file_info['file_data']
-                })
+                st.error(f"❌ Upload error for {upload_item['name']}: {str(e)}")
                 del st.session_state.processing_files[file_id]
 
-        # Rerun to update the UI with upload results
-        st.rerun()
+        # If there are more uploads in queue, trigger another rerun
+        if st.session_state.upload_queue:
+            st.rerun()
 
     # File uploader
     uploaded_files = st.file_uploader(
@@ -596,7 +618,7 @@ with tab2:
                     st.session_state.action = {'type': 'remove_file', 'file_id': file_info['id']}
                     st.rerun()
 
-    # Enhanced processing display with real-time WebSocket progress
+    # Enhanced processing display with manual progress polling instead of WebSocket session state
     if st.session_state.processing_files:
         st.markdown("---")
         st.subheader("🔄 Processing Files")
@@ -604,24 +626,28 @@ with tab2:
         for file_id, file_info in list(st.session_state.processing_files.items()):
             job_id = file_info.get('job_id')
 
-            # Update with real-time progress from WebSocket
-            if job_id and job_id in st.session_state.job_progress:
-                ws_progress = st.session_state.job_progress[job_id]
-
-                # Update file info with WebSocket data
-                file_info.update({
-                    'stage': ws_progress.get('stage', 'unknown'),
-                    'progress': ws_progress.get('progress', 0),
-                    'details': ws_progress.get('details', ''),
-                    'elapsed_time': ws_progress.get('elapsed_time', 0)
-                })
+            # Poll backend for progress instead of relying on WebSocket session state
+            if job_id and job_id != 'pending':
+                try:
+                    # Get current job status from backend
+                    status_response = api_request(f"/job/{job_id}", timeout=5)
+                    if status_response and status_response.get('stage'):
+                        # Update file info with backend data
+                        file_info.update({
+                            'stage': status_response.get('stage', 'unknown'),
+                            'progress': status_response.get('progress', 0),
+                            'details': status_response.get('details', ''),
+                            'elapsed_time': status_response.get('elapsed_time', 0)
+                        })
+                except Exception as e:
+                    logger.warning(f"Failed to poll job status: {e}")
 
             # Display file header
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.write(f"📄 **{file_info['name']}** ({file_info['size'] / 1024:.1f} KB)")
             with col2:
-                if job_id:
+                if job_id and job_id != 'pending':
                     st.caption(f"Job: {job_id[-8:]}")  # Show last 8 chars of job ID
 
             # Progress bar
@@ -643,7 +669,9 @@ with tab2:
                 'saving': ('💾', 'Saving Files'),
                 'indexing': ('🔍', 'Indexing for Search'),
                 'complete': ('🎉', 'Complete'),
-                'error': ('❌', 'Error')
+                'error': ('❌', 'Error'),
+                'uploaded': ('📤', 'Uploaded - Ready'),
+                'pending': ('⏳', 'Pending Upload')
             }
 
             current_stage = file_info.get('stage', 'unknown')
@@ -677,9 +705,6 @@ with tab2:
                 # Move to completed
                 st.session_state.completed_files[file_id] = file_info
                 del st.session_state.processing_files[file_id]
-                # Clean up progress tracking
-                if job_id in st.session_state.job_progress:
-                    del st.session_state.job_progress[job_id]
                 st.rerun()
 
             # Handle errors
@@ -693,9 +718,9 @@ with tab2:
 
             st.markdown("---")
 
-        # Auto-refresh for real-time updates every 3 seconds
+        # Auto-refresh for real-time updates every 2 seconds (instead of WebSocket)
         if st.session_state.processing_files:
-            time.sleep(3)
+            time.sleep(2)
             st.rerun()
 
     # Completed section
@@ -729,54 +754,196 @@ with tab2:
                     st.success("✅ Indexing complete!")
 
 with tab3:
-    st.header("Indexed Documents")
-    
-    # Refresh button
-    if st.button("🔄 Refresh List"):
-        st.rerun()
-    
-    # Get document list
-    docs_response = api_request("/documents")
-    
+    st.header("📚 Document Library")
+
+    # Only load documents when this tab is active - no more sidebar performance hit!
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("🔄 Refresh", type="primary"):
+            st.cache_data.clear()
+            st.rerun()
+    with col2:
+        search_docs = st.text_input(
+            "🔍 Search documents",
+            placeholder="Type to filter documents...",
+            key="doc_search"
+        )
+
+    # Get document list (only when this tab is used)
+    with st.spinner("Loading document library..."):
+        docs_response = api_request("/documents", timeout=20)
+
     if docs_response and docs_response.get("documents"):
-        documents = docs_response["documents"]
-        
-        # Group by source type
-        rulebooks = [d for d in documents if "rulebook" in d.lower() or "core" in d.lower()]
-        sessions = [d for d in documents if "session" in d.lower()]
-        other = [d for d in documents if d not in rulebooks and d not in sessions]
-        
-        col1, col2, col3 = st.columns(3)
-        
+        all_file_paths = docs_response["documents"]
+
+        # Group files by their parent document (folder name)
+        documents_by_source = {}
+        for file_path in all_file_paths:
+            path_obj = Path(file_path)
+            # Get the parent folder name (which should be the PDF name)
+            parent_folder = path_obj.parent.name
+
+            # Skip if it's just "processed_markdown" (top level files)
+            if parent_folder == "processed_markdown":
+                parent_folder = "Uncategorized"
+
+            if parent_folder not in documents_by_source:
+                documents_by_source[parent_folder] = []
+
+            documents_by_source[parent_folder].append(file_path)
+
+        # Filter by search term (search both document names and file content)
+        if search_docs:
+            filtered_docs = {}
+            search_lower = search_docs.lower()
+            for doc_name, files in documents_by_source.items():
+                if search_lower in doc_name.lower():
+                    # Document name matches
+                    filtered_docs[doc_name] = files
+                else:
+                    # Check if any files match
+                    matching_files = [f for f in files if search_lower in Path(f).name.lower()]
+                    if matching_files:
+                        filtered_docs[doc_name] = matching_files
+            documents_by_source = filtered_docs
+
+        # Categorize documents by type
+        doc_categories = {
+            "📘 Core Rulebooks": {},
+            "📖 Supplements & Expansions": {},
+            "📝 Session Logs": {},
+            "📄 Other Documents": {}
+        }
+
+        for doc_name, files in documents_by_source.items():
+            doc_lower = doc_name.lower()
+            if any(keyword in doc_lower for keyword in ["core", "basic", "main", "rulebook"]):
+                doc_categories["📘 Core Rulebooks"][doc_name] = files
+            elif "session" in doc_lower:
+                doc_categories["📝 Session Logs"][doc_name] = files
+            elif any(keyword in doc_lower for keyword in ["supplement", "expansion", "addon", "chrome", "arsenal", "matrix", "magic"]):
+                doc_categories["📖 Supplements & Expansions"][doc_name] = files
+            else:
+                doc_categories["📄 Other Documents"][doc_name] = files
+
+        # Display statistics
+        total_documents = len(documents_by_source)
+        total_files = sum(len(files) for files in documents_by_source.values())
+
+        col1, col2 = st.columns(2)
         with col1:
-            st.markdown("### 📘 Rulebooks")
-            for doc in rulebooks:
-                doc_name = Path(doc).stem
-                st.markdown(f"• **{doc_name}**")
-            if not rulebooks:
-                st.markdown("*No rulebooks indexed*")
-        
+            st.metric("📚 Documents", total_documents)
         with col2:
-            st.markdown("### 📝 Session Logs")
-            for doc in sessions:
-                doc_name = Path(doc).stem
-                st.markdown(f"• **{doc_name}**")
-            if not sessions:
-                st.markdown("*No session logs indexed*")
-        
-        with col3:
-            st.markdown("### 📄 Other Documents")
-            for doc in other:
-                doc_name = Path(doc).stem
-                st.markdown(f"• **{doc_name}**")
-            if not other:
-                st.markdown("*No other documents*")
-        
-        # Statistics
-        st.markdown("---")
-        st.metric("Total Documents", len(documents))
+            st.metric("📄 Total Chunks", total_files)
+
+        if search_docs:
+            st.info(f"🔍 Showing {total_documents} documents matching '{search_docs}'")
+
+        # Display each category
+        for category_name, category_docs in doc_categories.items():
+            if category_docs:
+                st.markdown(f"### {category_name}")
+
+                for doc_name, files in sorted(category_docs.items()):
+                    with st.expander(f"📖 **{doc_name}** ({len(files)} chunks)"):
+
+                        # Document-level actions
+                        col1, col2, col3, col4 = st.columns(4)
+
+                        with col1:
+                            if st.button(f"🎯 Search This Doc", key=f"search_doc_{doc_name}"):
+                                # Set filter and switch to query tab
+                                st.session_state.doc_filter = doc_name
+                                st.info(f"💡 Switch to Query tab - document filter is set to '{doc_name}'")
+
+                        with col2:
+                            if st.button(f"📊 Show Stats", key=f"stats_{doc_name}"):
+                                st.session_state.show_stats = doc_name
+
+                        with col3:
+                            if st.button(f"📄 List Chunks", key=f"chunks_{doc_name}"):
+                                st.session_state.show_chunks = doc_name
+
+                        with col4:
+                            # Calculate estimated pages (rough estimate: 20 chunks per page)
+                            estimated_pages = max(1, len(files) // 20)
+                            st.caption(f"📄 ~{estimated_pages} pages")
+
+                        # Show document statistics if requested
+                        if st.session_state.get('show_stats') == doc_name:
+                            st.markdown("#### 📊 Document Statistics")
+
+                            # Basic stats
+                            chunk_count = len(files)
+                            avg_chunk_size = "~500 words"  # Rough estimate
+
+                            stat_col1, stat_col2, stat_col3 = st.columns(3)
+                            with stat_col1:
+                                st.metric("Chunks", chunk_count)
+                            with stat_col2:
+                                st.metric("Avg Chunk", avg_chunk_size)
+                            with stat_col3:
+                                st.metric("Est. Pages", estimated_pages)
+
+                            # Top-level sections (based on chunk file names)
+                            section_names = []
+                            for file_path in files[:10]:  # Sample first 10
+                                chunk_name = Path(file_path).stem
+                                # Clean up chunk names for section detection
+                                clean_name = chunk_name.replace('_', ' ').title()
+                                section_names.append(clean_name[:30] + "..." if len(clean_name) > 30 else clean_name)
+
+                            if section_names:
+                                st.markdown("**Sample Sections:**")
+                                for section in section_names[:5]:
+                                    st.caption(f"• {section}")
+                                if len(files) > 5:
+                                    st.caption(f"... and {len(files) - 5} more sections")
+
+                        # Show chunk list if requested
+                        if st.session_state.get('show_chunks') == doc_name:
+                            st.markdown("#### 📄 Document Chunks")
+
+                            # Show chunks in a more organized way
+                            for i, file_path in enumerate(files[:20]):  # Limit to first 20
+                                chunk_name = Path(file_path).stem
+                                clean_name = chunk_name.replace('_', ' ').title()
+
+                                chunk_col1, chunk_col2 = st.columns([3, 1])
+                                with chunk_col1:
+                                    st.caption(f"{i+1}. {clean_name}")
+                                with chunk_col2:
+                                    if st.button("🔍", help="Search this chunk", key=f"search_chunk_{i}_{doc_name}"):
+                                        st.session_state.chunk_filter = clean_name
+                                        st.info(f"💡 Switch to Query tab - searching for content from '{clean_name}'")
+
+                            if len(files) > 20:
+                                st.caption(f"... and {len(files) - 20} more chunks")
+
+                        # Clear buttons for opened sections
+                        if st.session_state.get('show_stats') == doc_name or st.session_state.get('show_chunks') == doc_name:
+                            if st.button("🔼 Collapse", key=f"collapse_{doc_name}"):
+                                if 'show_stats' in st.session_state:
+                                    del st.session_state.show_stats
+                                if 'show_chunks' in st.session_state:
+                                    del st.session_state.show_chunks
+                                st.rerun()
+
     else:
-        st.info("No documents indexed yet. Upload PDFs to get started!")
+        st.info("📭 No documents indexed yet. Upload PDFs in the Upload tab to get started!")
+
+        # Show sample structure
+        st.markdown("### 💡 How it works")
+        st.markdown("""
+        When you upload PDFs, they get processed into searchable chunks:
+        - **📚 Each PDF** becomes a document group
+        - **📄 Each page/section** becomes a searchable chunk  
+        - **🔍 Search** can find content across all documents
+        - **🎯 Filter** lets you search within specific documents
+        """)
+
+        if st.button("📤 Upload Documents", type="primary"):
+            st.info("👆 Click the 'Upload' tab above to add your first documents!")
 
 with tab4:
     st.header("Session Notes")
