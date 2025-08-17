@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Callable
 import traceback
 import asyncio
+import threading
 
 # unstructured imports
 from unstructured.partition.pdf import partition_pdf
@@ -111,22 +112,31 @@ class UnstructuredProgressHandler(logging.Handler):
             logger.warning(f"Progress handler error: {e}")
 
     def _send_progress_update(self, stage: str, progress: float, details: str):
-        """Send progress update via callback."""
-        try:
-            elapsed = time.time() - self.start_time
+        """Send progress update via callback with proper async handling."""
+        if not self.progress_callback:
+            return
 
-            # Create async task if callback is async
-            if self.progress_callback:
-                if asyncio.iscoroutinefunction(self.progress_callback):
-                    # Create task in the event loop
-                    try:
-                        loop = asyncio.get_event_loop()
-                        loop.create_task(self.progress_callback(stage, progress, details))
-                    except RuntimeError:
-                        # No event loop in this thread - skip async update
-                        pass
-                else:
-                    self.progress_callback(stage, progress, details)
+        try:
+            # Use a thread to handle async callbacks safely
+            def run_callback():
+                try:
+                    if asyncio.iscoroutinefunction(self.progress_callback):
+                        # Create new event loop for this thread
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(self.progress_callback(stage, progress, details))
+                        finally:
+                            loop.close()
+                    else:
+                        # Synchronous callback
+                        self.progress_callback(stage, progress, details)
+                except Exception as e:
+                    logger.warning(f"Progress callback failed: {e}")
+
+            # Run in separate thread to avoid event loop conflicts
+            thread = threading.Thread(target=run_callback, daemon=True)
+            thread.start()
 
         except Exception as e:
             logger.warning(f"Failed to send progress update: {e}")
@@ -247,18 +257,33 @@ class PDFProcessor:
 
     def _send_progress(self, progress: float, stage: str, details: str):
         """Send progress update if callback is available."""
-        if self.progress_callback:
-            try:
-                if asyncio.iscoroutinefunction(self.progress_callback):
-                    try:
-                        loop = asyncio.get_event_loop()
-                        loop.create_task(self.progress_callback(stage, progress, details))
-                    except RuntimeError:
-                        pass  # No event loop
-                else:
-                    self.progress_callback(stage, progress, details)
-            except Exception as e:
-                logger.warning(f"Progress callback failed: {e}")
+        if not self.progress_callback:
+            return
+
+        try:
+            # Use a thread to handle async callbacks safely
+            def run_callback():
+                try:
+                    if asyncio.iscoroutinefunction(self.progress_callback):
+                        # Create new event loop for this thread
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(self.progress_callback(stage, progress, details))
+                        finally:
+                            loop.close()
+                    else:
+                        # Synchronous callback
+                        self.progress_callback(stage, progress, details)
+                except Exception as e:
+                    logger.warning(f"Progress callback failed: {e}")
+
+            # Run in separate thread to avoid event loop conflicts
+            thread = threading.Thread(target=run_callback, daemon=True)
+            thread.start()
+
+        except Exception as e:
+            logger.warning(f"Failed to send progress update: {e}")
 
     def _extract_elements_with_fallbacks(self, pdf_path: Path):
         """Extract elements using multiple strategies with fallbacks."""
