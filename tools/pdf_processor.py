@@ -1,4 +1,4 @@
-"""PDF to Markdown converter with REAL progress tracking via unstructured logging hooks."""
+"""PDF to Markdown converter with simplified synchronous progress tracking."""
 import json
 import os
 import logging
@@ -6,8 +6,6 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
 import traceback
-import asyncio
-import threading
 
 # unstructured imports
 from unstructured.partition.pdf import partition_pdf
@@ -23,13 +21,12 @@ from unstructured.logger import logger as unstructured_logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class UnstructuredProgressHandler(logging.Handler):
-    """Custom logging handler to capture real progress from unstructured library."""
+class SimpleProgressHandler(logging.Handler):
+    """Simplified logging handler to capture progress from unstructured library."""
 
-    def __init__(self, progress_callback: Callable, job_id: str, filename: str):
+    def __init__(self, progress_callback: Callable[[str, float, str], None], filename: str):
         super().__init__()
         self.progress_callback = progress_callback
-        self.job_id = job_id
         self.filename = filename
         self.start_time = time.time()
         self.current_progress = 5
@@ -98,7 +95,7 @@ class UnstructuredProgressHandler(logging.Handler):
                         except:
                             pass
 
-                    # Send progress update
+                    # Send progress update (simple synchronous call)
                     self._send_progress_update(stage, self.current_progress, details)
                     break
 
@@ -112,34 +109,15 @@ class UnstructuredProgressHandler(logging.Handler):
             logger.warning(f"Progress handler error: {e}")
 
     def _send_progress_update(self, stage: str, progress: float, details: str):
-        """Send progress update via callback with proper async handling."""
+        """Send progress update via callback (simplified synchronous version)."""
         if not self.progress_callback:
             return
 
         try:
-            # Use a thread to handle async callbacks safely
-            def run_callback():
-                try:
-                    if asyncio.iscoroutinefunction(self.progress_callback):
-                        # Create new event loop for this thread
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            loop.run_until_complete(self.progress_callback(stage, progress, details))
-                        finally:
-                            loop.close()
-                    else:
-                        # Synchronous callback
-                        self.progress_callback(stage, progress, details)
-                except Exception as e:
-                    logger.warning(f"Progress callback failed: {e}")
-
-            # Run in separate thread to avoid event loop conflicts
-            thread = threading.Thread(target=run_callback, daemon=True)
-            thread.start()
-
+            # Simple synchronous callback - no threading complexity
+            self.progress_callback(stage, progress, details)
         except Exception as e:
-            logger.warning(f"Failed to send progress update: {e}")
+            logger.warning(f"Progress callback failed: {e}")
 
 class PDFProcessor:
     def __init__(
@@ -148,7 +126,7 @@ class PDFProcessor:
         chunk_size: int = 1024,
         use_ocr: bool = True,
         debug_mode: bool = True,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable[[str, float, str], None]] = None
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,7 +141,7 @@ class PDFProcessor:
             self.debug_dir.mkdir(exist_ok=True)
 
     def process_pdf(self, pdf_path: str, force_reparse: bool = False) -> Dict[str, str]:
-        """Process PDF with REAL progress tracking via unstructured logging."""
+        """Process PDF with simplified synchronous progress tracking."""
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
@@ -178,24 +156,22 @@ class PDFProcessor:
             logger.info(f"Skipping {pdf_name} (already processed)")
             return self._load_existing_files(output_subdir)
 
-        logger.info(f"Processing {pdf_path} with REAL progress tracking")
+        logger.info(f"Processing {pdf_path} with simplified progress tracking")
 
         # Set up progress tracking via logging
-        job_id = f"{pdf_name}_{int(time.time())}"
         progress_handler = None
 
         try:
-            # Install our custom logging handler
+            # Install our simplified logging handler
             if self.progress_callback:
-                progress_handler = UnstructuredProgressHandler(
-                    self.progress_callback, job_id, pdf_name
-                )
+                progress_handler = SimpleProgressHandler(self.progress_callback, pdf_name)
+
                 # Add to both unstructured logger and root logger to catch everything
                 unstructured_logger.addHandler(progress_handler)
                 logging.getLogger().addHandler(progress_handler)
 
                 # Initial progress
-                self._send_progress(5, "starting", "Setting up PDF processing...")
+                self.progress_callback("starting", 5, "Setting up PDF processing...")
 
             # Stage 1: Extract elements using unstructured (this is where the real work happens)
             logger.info("Reading PDF for file: %s ...", pdf_path)
@@ -230,7 +206,8 @@ class PDFProcessor:
             logger.info("chunk_by_title succeeded: %d chunks", len(chunks))
 
             # Stage 5: Save files
-            self._send_progress(90, "saving", "Saving markdown files...")
+            if self.progress_callback:
+                self.progress_callback("saving", 90, "Saving markdown files...")
             saved_files = self._save_chunks(chunks, output_subdir, pdf_name)
 
             # Save metadata
@@ -238,14 +215,16 @@ class PDFProcessor:
 
             # Final success
             logger.info("Successfully processed %s: %d files created", pdf_name, len(saved_files))
-            self._send_progress(100, "complete", f"Processing complete! Created {len(saved_files)} files.")
+            if self.progress_callback:
+                self.progress_callback("complete", 100, f"Processing complete! Created {len(saved_files)} files.")
 
             return saved_files
 
         except Exception as e:
             logger.error("Processing failed: %s", str(e))
             logger.error(traceback.format_exc())
-            self._send_progress(-1, "error", f"Processing failed: {str(e)}")
+            if self.progress_callback:
+                self.progress_callback("error", -1, f"Processing failed: {str(e)}")
             # Try emergency fallback
             return self._emergency_fallback(pdf_path, output_subdir, pdf_name)
 
@@ -254,36 +233,6 @@ class PDFProcessor:
             if progress_handler:
                 unstructured_logger.removeHandler(progress_handler)
                 logging.getLogger().removeHandler(progress_handler)
-
-    def _send_progress(self, progress: float, stage: str, details: str):
-        """Send progress update if callback is available."""
-        if not self.progress_callback:
-            return
-
-        try:
-            # Use a thread to handle async callbacks safely
-            def run_callback():
-                try:
-                    if asyncio.iscoroutinefunction(self.progress_callback):
-                        # Create new event loop for this thread
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            loop.run_until_complete(self.progress_callback(stage, progress, details))
-                        finally:
-                            loop.close()
-                    else:
-                        # Synchronous callback
-                        self.progress_callback(stage, progress, details)
-                except Exception as e:
-                    logger.warning(f"Progress callback failed: {e}")
-
-            # Run in separate thread to avoid event loop conflicts
-            thread = threading.Thread(target=run_callback, daemon=True)
-            thread.start()
-
-        except Exception as e:
-            logger.warning(f"Failed to send progress update: {e}")
 
     def _extract_elements_with_fallbacks(self, pdf_path: Path):
         """Extract elements using multiple strategies with fallbacks."""
@@ -532,6 +481,8 @@ class PDFProcessor:
                 md_content = f"# {pdf_name}\n\n{text}"
                 file_path.write_text(md_content, encoding='utf-8')
                 logger.info("Emergency fallback created: %s", file_path)
+                if self.progress_callback:
+                    self.progress_callback("complete", 100, "Completed using text extraction fallback")
                 return {str(file_path): md_content}
         except Exception as e:
             logger.error("Emergency fallback failed: %s", str(e))
@@ -553,5 +504,5 @@ class PDFProcessor:
             "total_elements": total_elements,
             "cleaned_elements": cleaned_elements,
             "chunks_created": chunks,
-            "processor_version": "real_progress_v1"
+            "processor_version": "simplified_v1"
         }, indent=2))
