@@ -1,4 +1,4 @@
 # Frontend-only dependencies for Streamlit app
 streamlit==1.48.1
 requests==2.32.4
-websocket-client==1.6.4
+websockets==15.0.1

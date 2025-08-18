@@ -5,12 +5,13 @@ import threading
 import json
 from datetime import datetime
 from typing import Dict, Optional
+import asyncio
+import websockets
 
 import streamlit as st
 import requests
 from pathlib import Path
 import logging
-import websocket
 
 # API configuration
 API_URL = os.getenv("API_URL", "http://localhost:8000")
@@ -24,36 +25,45 @@ st.set_page_config(
     layout="wide"
 )
 
-# FIXED: Persistent WebSocket connection across reruns
-class PersistentWebSocketHandler:
-    """Persistent WebSocket handler that survives Streamlit reruns."""
-
-    _instance = None
-    _lock = threading.Lock()
-
-    def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
-            return cls._instance
-
-    def __init__(self):
-        if self._initialized:
-            return
-
-        self.ws = None
+# ---- Async WebSocket Manager ----
+class AsyncWebSocketManager:
+    def __init__(self, url):
+        self.url = url
+        self.loop = None
+        self.thread = None
         self.running = False
         self.connected = False
-        self.reconnect_attempts = 0
-        self.max_reconnect_attempts = 5
         self.global_progress = {}
         self.progress_lock = threading.Lock()
-        self._initialized = True
-        logger.info("🔧 PersistentWebSocketHandler initialized (singleton)")
+        self.message_queue = []
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
 
-    def on_message(self, ws, message):
-        """Handle incoming progress messages."""
+    async def connect(self):
+        try:
+            async with websockets.connect(self.url) as websocket:
+                self.ws = websocket
+                self.connected = True
+                self.reconnect_attempts = 0
+                logger.info("✅ Async WebSocket connected successfully")
+
+                while self.running:
+                    try:
+                        msg = await websocket.recv()
+                        await self.handle_message(msg)
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.info("WebSocket connection closed")
+                        break
+                    except Exception as e:
+                        logger.warning(f"WebSocket receive error: {e}")
+                        break
+        except Exception as e:
+            logger.error(f"WebSocket connection failed: {e}")
+            self.connected = False
+        finally:
+            self.connected = False
+
+    async def handle_message(self, message):
         try:
             data = json.loads(message)
             job_id = data.get('job_id')
@@ -61,81 +71,43 @@ class PersistentWebSocketHandler:
             if job_id:
                 with self.progress_lock:
                     self.global_progress[job_id] = data
+
                 logger.info(f"WebSocket progress: {job_id} - {data.get('stage')} ({data.get('progress')}%)")
+
+                # Store message for UI processing
+                self.message_queue.append(data)
 
         except Exception as e:
             logger.error(f"WebSocket message error: {e}")
 
-    def on_error(self, ws, error):
-        """Handle WebSocket errors."""
-        logger.warning(f"WebSocket error: {error}")
-        self.connected = False
+    def start(self):
+        if self.running:
+            return
+        self.running = True
 
-    def on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket close."""
-        logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
-        self.connected = False
+        def run_loop():
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_until_complete(self.connect())
 
-        # Attempt reconnection if we were running
-        if self.running and self.reconnect_attempts < self.max_reconnect_attempts:
-            self.reconnect_attempts += 1
-            logger.info(f"Reconnecting WebSocket {self.reconnect_attempts}/{self.max_reconnect_attempts}")
-            time.sleep(min(2 ** self.reconnect_attempts, 30))
+        self.thread = threading.Thread(target=run_loop, daemon=True)
+        self.thread.start()
 
-            if self.running:
-                self.connect()
-
-    def on_open(self, ws):
-        """Handle WebSocket open."""
-        logger.info("WebSocket connected successfully")
-        self.connected = True
-        self.reconnect_attempts = 0
-
-    def connect(self):
-        """Connect to WebSocket (only if not already connected)."""
-        with self.progress_lock:
-            if self.connected:
-                return
-
-        try:
-            ws_url = API_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/progress'
-            logger.info(f"Connecting to WebSocket: {ws_url}")
-
-            # Test backend reachability first
-            try:
-                health_check = requests.get(f"{API_URL}/", timeout=5)
-                logger.info(f"Backend health check: {health_check.status_code}")
-            except Exception as e:
-                logger.error(f"Backend not reachable: {e}")
-                return
-
-            self.ws = websocket.WebSocketApp(
-                ws_url,
-                on_message=self.on_message,
-                on_error=self.on_error,
-                on_close=self.on_close,
-                on_open=self.on_open
-            )
-
-            self.running = True
-            self.ws.run_forever()
-
-        except Exception as e:
-            logger.error(f"WebSocket connection failed: {e}")
-            with self.progress_lock:
-                self.connected = False
-
-    def disconnect(self):
-        """Disconnect WebSocket."""
+    def stop(self):
         self.running = False
-        if self.ws:
-            self.ws.close()
-        with self.progress_lock:
-            self.connected = False
+        self.connected = False
+        if self.loop:
+            self.loop.call_soon_threadsafe(self.loop.stop)
 
-    def is_connected(self):
-        """Check if WebSocket is connected."""
-        return self.connected
+    def send(self, message):
+        if self.loop and self.ws and self.connected:
+            asyncio.run_coroutine_threadsafe(self.ws.send(message), self.loop)
+
+    def get_messages(self):
+        """Get and clear messages - called by UI"""
+        msgs = self.message_queue[:]
+        self.message_queue.clear()
+        return msgs
 
     def get_progress(self, job_id):
         """Get progress for specific job."""
@@ -147,35 +119,82 @@ class PersistentWebSocketHandler:
         with self.progress_lock:
             return self.global_progress.copy()
 
-# Get the singleton WebSocket handler
-websocket_handler = PersistentWebSocketHandler()
+    def is_connected(self):
+        """Check if WebSocket is connected."""
+        return self.connected
 
-# FIXED: Session state initialization (only initialize once)
+# ---- Persistent WebSocket Manager in session state ----
+def get_websocket_manager():
+    if "ws_manager" not in st.session_state:
+        ws_url = API_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/progress'
+        st.session_state.ws_manager = AsyncWebSocketManager(ws_url)
+        st.session_state.ws_manager.start()
+        logger.info(f"🔧 Async WebSocket manager initialized for {ws_url}")
+    return st.session_state.ws_manager
+
+# ---- WebSocket utility functions ----
+def ensure_websocket_connection():
+    """Ensure WebSocket is connected."""
+    ws_manager = get_websocket_manager()
+    if not ws_manager.is_connected():
+        # Try to restart if not connected
+        ws_manager.stop()
+        time.sleep(0.1)
+        ws_manager.start()
+    return ws_manager.is_connected()
+
+def sync_websocket_progress():
+    """Sync progress from WebSocket manager to session state."""
+    ws_manager = get_websocket_manager()
+
+    # Process any new messages
+    new_messages = ws_manager.get_messages()
+
+    # Also sync the progress data for get_job_progress calls
+    all_progress = ws_manager.get_all_progress()
+
+    # Update session state with new progress data
+    for job_id, progress_data in all_progress.items():
+        for file_id, file_info in st.session_state.processing_files.items():
+            if file_info.get('job_id') == job_id:
+                old_progress = file_info.get('progress', 0)
+                old_stage = file_info.get('stage', 'unknown')
+
+                file_info.update({
+                    'stage': progress_data.get('stage', 'unknown'),
+                    'progress': progress_data.get('progress', 0),
+                    'details': progress_data.get('details', ''),
+                    'timestamp': progress_data.get('timestamp', time.time())
+                })
+
+                # Trigger UI update if there's meaningful change
+                if (old_progress != progress_data.get('progress', 0) or
+                    old_stage != progress_data.get('stage', 'unknown')):
+                    st.session_state._websocket_update_pending = True
+
+def get_job_progress(job_id: str) -> Optional[Dict]:
+    """Get job progress from WebSocket manager or polling."""
+    ws_manager = get_websocket_manager()
+    progress_data = ws_manager.get_progress(job_id)
+    if progress_data:
+        return progress_data
+
+    if not ws_manager.is_connected():
+        return poll_job_status(job_id)
+
+    return None
+
+# Session state initialization (only initialize once)
 if 'session_initialized' not in st.session_state:
     st.session_state.session_initialized = True
     st.session_state.websocket_connected = False
-    st.session_state.websocket_thread = None
     st.session_state.query_input = ""
     st.session_state.ready_files = []
     st.session_state.processing_files = {}
     st.session_state.completed_files = {}
     st.session_state.uploader_key = 0
     st.session_state.last_refresh = time.time()
-
-def start_websocket_connection():
-    """Start WebSocket connection (only if not already running)."""
-    if not websocket_handler.is_connected() and not st.session_state.websocket_thread:
-        def run_websocket():
-            try:
-                logger.info("Starting WebSocket connection thread...")
-                websocket_handler.connect()
-            except Exception as e:
-                logger.error(f"WebSocket thread error: {e}")
-
-        thread = threading.Thread(target=run_websocket, daemon=True)
-        thread.start()
-        st.session_state.websocket_thread = thread
-        logger.info("WebSocket thread started")
+    st.session_state._websocket_update_pending = False
 
 def poll_job_status(job_id: str) -> Optional[Dict]:
     """Poll job status as fallback when WebSocket is unavailable."""
@@ -186,31 +205,6 @@ def poll_job_status(job_id: str) -> Optional[Dict]:
     except Exception as e:
         logger.warning(f"Polling failed for {job_id}: {e}")
     return None
-
-def get_job_progress(job_id: str) -> Optional[Dict]:
-    """Get job progress from WebSocket handler or polling."""
-    progress_data = websocket_handler.get_progress(job_id)
-    if progress_data:
-        return progress_data
-
-    if not websocket_handler.is_connected():
-        return poll_job_status(job_id)
-
-    return None
-
-def sync_websocket_progress():
-    """Sync progress from WebSocket handler to session state for UI updates."""
-    all_progress = websocket_handler.get_all_progress()
-
-    for job_id, progress_data in all_progress.items():
-        for file_id, file_info in st.session_state.processing_files.items():
-            if file_info.get('job_id') == job_id:
-                file_info.update({
-                    'stage': progress_data.get('stage', 'unknown'),
-                    'progress': progress_data.get('progress', 0),
-                    'details': progress_data.get('details', ''),
-                    'timestamp': progress_data.get('timestamp', time.time())
-                })
 
 @st.cache_data(ttl=30)
 def get_available_models():
@@ -312,7 +306,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Start WebSocket connection ONCE
-start_websocket_connection()
+ws_manager = get_websocket_manager()
 
 # Title and description
 st.title("🎲 Shadowrun RAG Assistant")
@@ -321,8 +315,8 @@ st.markdown("*Your AI-powered guide to the Sixth World*")
 # Connection status indicator
 col1, col2 = st.columns([4, 1])
 with col2:
-    # Update session state from persistent WebSocket handler
-    st.session_state.websocket_connected = websocket_handler.is_connected()
+    # Update session state from persistent WebSocket manager
+    st.session_state.websocket_connected = ws_manager.is_connected()
 
     if st.session_state.websocket_connected:
         st.markdown('<span class="status-indicator status-connected"></span>**WebSocket Connected**',
@@ -334,16 +328,15 @@ with col2:
 # Debug info
 with st.expander("🔧 WebSocket Debug Info"):
     st.write(f"**WebSocket URL:** {API_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/ws/progress")
-    st.write(f"**Thread alive:** {st.session_state.websocket_thread and st.session_state.websocket_thread.is_alive() if st.session_state.websocket_thread else 'No thread'}")
-    st.write(f"**Handler connected:** {websocket_handler.is_connected()}")
-    st.write(f"**Reconnect attempts:** {websocket_handler.reconnect_attempts}")
+    st.write(f"**Thread alive:** {ws_manager.thread and ws_manager.thread.is_alive() if ws_manager.thread else 'No thread'}")
+    st.write(f"**Manager connected:** {ws_manager.is_connected()}")
+    st.write(f"**Reconnect attempts:** {ws_manager.reconnect_attempts}")
 
     if st.button("🔄 Force Reconnect"):
         # Reset the connection
-        st.session_state.websocket_thread = None
-        websocket_handler.disconnect()
-        websocket_handler.reconnect_attempts = 0
-        start_websocket_connection()
+        ws_manager.stop()
+        time.sleep(0.1)
+        ws_manager.start()
         st.rerun()
 
 # Auto-refresh (only when needed)
@@ -656,6 +649,12 @@ with tab2:
 
         sync_websocket_progress()
 
+        # Check for WebSocket updates
+        if st.session_state._websocket_update_pending:
+            st.session_state._websocket_update_pending = False
+            time.sleep(0.1)  # Small delay to let updates settle
+            st.rerun()
+
         for file_id, file_info in list(st.session_state.processing_files.items()):
             job_id = file_info.get('job_id')
 
@@ -677,7 +676,8 @@ with tab2:
                 if job_id and job_id != 'pending':
                     st.caption(f"Job: {job_id[-8:]}")
             with col3:
-                if websocket_handler.is_connected():
+                ws_manager = get_websocket_manager()
+                if ws_manager.is_connected():
                     st.caption("🟢 Real-time")
                 else:
                     st.caption("🟡 Polling")
@@ -749,9 +749,10 @@ with tab2:
 
             st.markdown("---")
 
-        # Smart refresh logic
+        # Smart refresh logic - only when processing files exist
         if st.session_state.processing_files:
-            if websocket_handler.is_connected():
+            ws_manager = get_websocket_manager()
+            if ws_manager.is_connected():
                 time.sleep(1)
                 st.rerun()
             else:
@@ -805,7 +806,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center'>
-        <small>🎲 Shadowrun RAG Assistant v2.0 | Persistent WebSocket | Powered by Ollama & ChromaDB</small>
+        <small>🎲 Shadowrun RAG Assistant v2.0 | Async WebSocket | Powered by Ollama & ChromaDB</small>
     </div>
     """,
     unsafe_allow_html=True
