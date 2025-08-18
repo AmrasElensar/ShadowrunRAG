@@ -1,4 +1,4 @@
-"""Streamlit web UI with polling-based progress tracking and localStorage persistence."""
+"""Streamlit web UI with simple polling-based progress tracking."""
 import os
 import time
 import json
@@ -21,97 +21,32 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---- localStorage Helper Functions ----
-def save_to_localstorage(key: str, data: dict):
-    """Save data to browser localStorage via JavaScript."""
-    json_data = json.dumps(data, default=str)  # Handle datetime serialization
-    js_code = f"""
-    <script>
-    localStorage.setItem('{key}', '{json_data}');
-    </script>
-    """
-    st.components.v1.html(js_code, height=0)
-
-def load_from_localstorage(key: str) -> dict:
-    """Load data from browser localStorage via JavaScript."""
-    # This creates a hidden component that will store the result
-    js_code = f"""
-    <script>
-    const data = localStorage.getItem('{key}');
-    if (data) {{
-        const parsed = JSON.parse(data);
-        // Store in a way Streamlit can access
-        window.parent.postMessage({{
-            type: 'localStorage_data',
-            key: '{key}',
-            data: parsed
-        }}, '*');
-    }}
-    </script>
-    """
-
-    # For now, we'll use session state as fallback
-    # In a real implementation, you'd need streamlit-javascript or similar
-    return st.session_state.get(f"localStorage_{key}", {})
-
-def clear_localstorage(key: str):
-    """Clear specific key from localStorage."""
-    js_code = f"""
-    <script>
-    localStorage.removeItem('{key}');
-    </script>
-    """
-    st.components.v1.html(js_code, height=0)
-
-# ---- Session State Management with Persistence ----
+# ---- Session State Management ----
 def initialize_session_state():
-    """Initialize session state with localStorage persistence."""
-    if 'session_initialized' not in st.session_state:
-        st.session_state.session_initialized = True
-
-        # Try to load from localStorage (fallback to session_state for now)
+    """Initialize session state with all required variables."""
+    # Initialize each variable individually with defaults
+    if 'ready_files' not in st.session_state:
         st.session_state.ready_files = []
+
+    if 'processing_files' not in st.session_state:
         st.session_state.processing_files = {}
+
+    if 'completed_files' not in st.session_state:
         st.session_state.completed_files = {}
+
+    if 'uploader_key' not in st.session_state:
         st.session_state.uploader_key = 0
-        st.session_state.last_poll_time = 0
-        st.session_state.poll_interval = 10  # Start with 10 seconds
+
+    if 'query_input' not in st.session_state:
         st.session_state.query_input = ""
 
-        # Load persisted data
-        load_persisted_state()
-
-def load_persisted_state():
-    """Load state from localStorage (simplified version using session state)."""
-    # In a real implementation, you'd load from actual localStorage
-    # For now, we'll use a simple approach that persists during the session
-    pass
-
-def save_persisted_state():
-    """Save current state to localStorage."""
-    state_data = {
-        'ready_files': st.session_state.ready_files,
-        'processing_files': st.session_state.processing_files,
-        'completed_files': st.session_state.completed_files,
-        'timestamp': datetime.now().isoformat()
-    }
-    # save_to_localstorage('shadowrun_rag_state', state_data)
-
-# ---- Polling System ----
-def should_poll() -> bool:
-    """Determine if we should poll for updates."""
-    if not st.session_state.processing_files:
-        return False
-
-    time_since_last_poll = time.time() - st.session_state.last_poll_time
-    return time_since_last_poll >= st.session_state.poll_interval
-
+# ---- Simple Polling System ----
 def poll_all_jobs():
     """Poll all active processing jobs for updates."""
     if not st.session_state.processing_files:
-        return
+        return False
 
-    st.session_state.last_poll_time = time.time()
+    logger.info(f"Polling {len(st.session_state.processing_files)} jobs...")
     updates_found = False
 
     for file_id, file_info in list(st.session_state.processing_files.items()):
@@ -153,15 +88,6 @@ def poll_all_jobs():
 
         except Exception as e:
             logger.warning(f"Failed to poll job {job_id}: {e}")
-
-    # Adjust polling interval based on activity
-    if updates_found:
-        st.session_state.poll_interval = max(5, st.session_state.poll_interval - 2)  # Speed up
-    else:
-        st.session_state.poll_interval = min(15, st.session_state.poll_interval + 1)  # Slow down
-
-    # Save state after updates
-    save_persisted_state()
 
     return updates_found
 
@@ -340,10 +266,11 @@ def render_file_progress(file_id: str, file_info: Dict):
 # Initialize session state
 initialize_session_state()
 
-# Auto-polling logic
-if should_poll():
-    if poll_all_jobs():
-        st.rerun()
+# Simple auto-refresh - runs every 10 seconds when files are processing
+if st.session_state.processing_files:
+    poll_all_jobs()  # Check for updates
+    time.sleep(10)   # Wait 10 seconds
+    st.rerun()       # Rerun to continue cycle
 
 # Custom CSS
 st.markdown("""
@@ -412,10 +339,8 @@ st.markdown("*Your AI-powered guide to the Sixth World*")
 col1, col2 = st.columns([4, 1])
 with col2:
     if st.session_state.processing_files:
-        poll_interval = st.session_state.poll_interval
-        next_poll = poll_interval - (time.time() - st.session_state.last_poll_time)
         st.markdown(
-            f'<span class="status-indicator status-polling"></span>**Polling** (next in {max(0, int(next_poll))}s)',
+            '<span class="status-indicator status-polling"></span>**Polling Active**',
             unsafe_allow_html=True
         )
     else:
@@ -427,10 +352,14 @@ with col2:
 # Debug info
 with st.expander("🔧 System Info"):
     st.write(f"**API URL:** {API_URL}")
-    st.write(f"**Poll interval:** {st.session_state.poll_interval}s")
     st.write(f"**Processing files:** {len(st.session_state.processing_files)}")
     st.write(f"**Ready files:** {len(st.session_state.ready_files)}")
     st.write(f"**Completed files:** {len(st.session_state.completed_files)}")
+
+    if st.session_state.processing_files:
+        st.write("**Current processing files:**")
+        for file_id, info in st.session_state.processing_files.items():
+            st.write(f"- {info['name']}: Job {info.get('job_id', 'pending')}")
 
     if st.button("🧹 Clear All State"):
         st.session_state.ready_files = []
@@ -473,8 +402,7 @@ with st.sidebar:
     filter_section = st.selectbox("Filter by Section (optional)", section_options, index=0)
     filter_section = None if filter_section == "All" else filter_section
 
-    filter_subsection = st.text_input("Filter by Subsection (optional)",
-                                      placeholder="e.g., Hacking, Spellcasting, Initiative")
+    filter_subsection = st.text_input("Filter by Subsection (optional)", placeholder="e.g., Hacking, Spellcasting, Initiative")
     filter_subsection = None if filter_subsection.strip() == "" else filter_subsection
 
 # Main interface tabs
@@ -588,7 +516,7 @@ with tab1:
 with tab2:
     st.header("Upload PDFs")
 
-    # Process pending actions (simplified)
+    # Process pending actions
     if 'action' in st.session_state:
         action = st.session_state.action
 
@@ -597,31 +525,34 @@ with tab2:
             st.session_state.uploader_key += 1
 
         elif action['type'] == 'process_all':
-            # Move all ready files to processing
-            for file_info in st.session_state.ready_files:
-                st.session_state.processing_files[file_info['id']] = {
-                    'name': file_info['name'],
-                    'size': file_info['size'],
-                    'job_id': 'pending',
-                    'stage': 'preparing',
-                    'progress': 0,
-                    'details': 'Preparing to upload...',
-                    'start_time': datetime.now()
-                }
+            # Clear ready files FIRST to hide the section immediately
+            files_to_process = st.session_state.ready_files.copy()
+            st.session_state.ready_files = []
+            st.session_state.uploader_key += 1
+
+            # Then move to processing (prevent duplicates by checking if already exists)
+            for file_info in files_to_process:
+                if file_info['id'] not in st.session_state.processing_files:
+                    st.session_state.processing_files[file_info['id']] = {
+                        'name': file_info['name'],
+                        'size': file_info['size'],
+                        'job_id': 'pending',
+                        'stage': 'preparing',
+                        'progress': 0,
+                        'details': 'Preparing to upload...',
+                        'start_time': datetime.now()
+                    }
 
             # Add to upload queue
             if 'upload_queue' not in st.session_state:
                 st.session_state.upload_queue = []
 
-            for file_info in st.session_state.ready_files:
+            for file_info in files_to_process:
                 st.session_state.upload_queue.append({
                     'file_id': file_info['id'],
                     'name': file_info['name'],
                     'file_data': file_info['file'].getvalue(),
                 })
-
-            st.session_state.ready_files = []
-            st.session_state.uploader_key += 1
 
         elif action['type'] == 'remove_file':
             file_id = action['file_id']
@@ -634,15 +565,22 @@ with tab2:
             file_info = next((f for f in st.session_state.ready_files if f['id'] == file_id), None)
 
             if file_info:
-                st.session_state.processing_files[file_id] = {
-                    'name': file_info['name'],
-                    'size': file_info['size'],
-                    'job_id': 'pending',
-                    'stage': 'preparing',
-                    'progress': 0,
-                    'details': 'Preparing to upload...',
-                    'start_time': datetime.now()
-                }
+                # Remove from ready files FIRST
+                st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
+                if not st.session_state.ready_files:
+                    st.session_state.uploader_key += 1
+
+                # Then add to processing (prevent duplicates)
+                if file_id not in st.session_state.processing_files:
+                    st.session_state.processing_files[file_id] = {
+                        'name': file_info['name'],
+                        'size': file_info['size'],
+                        'job_id': 'pending',
+                        'stage': 'preparing',
+                        'progress': 0,
+                        'details': 'Preparing to upload...',
+                        'start_time': datetime.now()
+                    }
 
                 if 'upload_queue' not in st.session_state:
                     st.session_state.upload_queue = []
@@ -653,19 +591,15 @@ with tab2:
                     'file_data': file_info['file'].getvalue(),
                 })
 
-                st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
-                if not st.session_state.ready_files:
-                    st.session_state.uploader_key += 1
-
         del st.session_state.action
-        save_persisted_state()
-        st.rerun()
+        #st.rerun()
 
     # Process upload queue
     if 'upload_queue' in st.session_state and st.session_state.upload_queue:
         upload_item = st.session_state.upload_queue.pop(0)
         file_id = upload_item['file_id']
 
+        # Only process if file is still in processing (avoid duplicates)
         if file_id in st.session_state.processing_files:
             try:
                 st.session_state.processing_files[file_id]['stage'] = 'uploading'
@@ -692,15 +626,14 @@ with tab2:
 
             except Exception as e:
                 st.error(f"❌ Upload error for {upload_item['name']}: {str(e)}")
-                del st.session_state.processing_files[file_id]
-
-        save_persisted_state()
+                if file_id in st.session_state.processing_files:
+                    del st.session_state.processing_files[file_id]
 
         # Continue processing queue
         if st.session_state.upload_queue:
             st.rerun()
 
-    # File uploader
+    # File uploader - Hide uploaded files when processing
     uploaded_files = st.file_uploader(
         "Choose PDF files",
         type=['pdf'],
@@ -709,8 +642,8 @@ with tab2:
         key=f"pdf_uploader_{st.session_state.uploader_key}"
     )
 
-    # Add uploaded files to ready list
-    if uploaded_files:
+    # Add uploaded files to ready list (only if not processing anything)
+    if uploaded_files and not st.session_state.processing_files:
         for uploaded_file in uploaded_files:
             file_id = f"{uploaded_file.name}_{uploaded_file.size}_{int(time.time())}"
             if not any(f['id'] == file_id for f in st.session_state.ready_files):
@@ -754,11 +687,6 @@ with tab2:
         st.markdown("---")
         st.subheader("🔄 Processing Files")
 
-        # Show polling status
-        if should_poll():
-            with st.spinner("Checking for updates..."):
-                poll_all_jobs()
-
         for file_id, file_info in list(st.session_state.processing_files.items()):
             render_file_progress(file_id, file_info)
             st.markdown("---")
@@ -781,7 +709,6 @@ with tab2:
         # Clear completed files button
         if st.button("🧹 Clear Completed"):
             st.session_state.completed_files = {}
-            save_persisted_state()
             st.rerun()
 
     # Manual indexing section
@@ -870,23 +797,18 @@ with tab4:
     - Query past session events and NPCs
     - Track ongoing plot threads
     - Search for specific events across your campaign
-
+    
     For now, you can upload session notes as PDFs in the Upload tab,
     and they'll be searchable through the main Query interface.
     """)
-
-# Auto-refresh for processing files
-if st.session_state.processing_files and should_poll():
-    time.sleep(1)  # Small delay to prevent too frequent refreshes
-    st.rerun()
 
 # Footer
 st.markdown("---")
 st.markdown(
     f"""
     <div style='text-align: center'>
-        <small>🎲 Shadowrun RAG Assistant v2.1 | Polling-based Updates | Powered by Ollama & ChromaDB</small><br>
-        <small>Poll interval: {st.session_state.poll_interval}s | Processing: {len(st.session_state.processing_files)} files</small>
+        <small>🎲 Shadowrun RAG Assistant v2.1 | Simple Polling | Powered by Ollama & ChromaDB</small><br>
+        <small>Processing: {len(st.session_state.processing_files)} files</small>
     </div>
     """,
     unsafe_allow_html=True

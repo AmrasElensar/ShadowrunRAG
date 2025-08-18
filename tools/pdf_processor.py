@@ -65,6 +65,12 @@ class SimpleProgressHandler(logging.Handler):
         try:
             message = record.getMessage()
 
+            # Skip our own progress messages to avoid recursion
+            if ("Progress [" in message or
+                "Progress callback failed" in message or
+                "Progress handler error" in message):
+                return
+
             # Check for known progress patterns
             for pattern, (stage, progress, description) in self.stage_patterns.items():
                 if pattern in message:
@@ -99,14 +105,15 @@ class SimpleProgressHandler(logging.Handler):
                     self._send_progress_update(stage, self.current_progress, details)
                     break
 
-            # Special handling for error patterns
-            if any(error_word in message.lower() for error_word in ["error", "failed", "exception"]):
-                if "processing failed" not in message.lower():  # Avoid our own error messages
-                    self._send_progress_update("error", -1, f"Processing error: {message}")
+            # Special handling for error patterns (but avoid our own messages)
+            if (any(error_word in message.lower() for error_word in ["error", "failed", "exception"]) and
+                "processing failed" not in message.lower() and
+                "progress" not in message.lower()):
+                self._send_progress_update("error", -1, f"Processing error: {message}")
 
         except Exception as e:
-            # Don't let logging errors break the main process
-            logger.warning(f"Progress handler error: {e}")
+            # Don't let logging errors break the main process - and don't log this to avoid recursion
+            pass
 
     def _send_progress_update(self, stage: str, progress: float, details: str):
         """Send progress update via callback (simplified synchronous version)."""
@@ -117,7 +124,8 @@ class SimpleProgressHandler(logging.Handler):
             # Simple synchronous callback - no threading complexity
             self.progress_callback(stage, progress, details)
         except Exception as e:
-            logger.warning(f"Progress callback failed: {e}")
+            # Don't log this to avoid recursion - just silently fail
+            pass
 
 class PDFProcessor:
     def __init__(

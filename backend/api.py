@@ -392,13 +392,30 @@ async def status():
             if meta and 'source' in meta:
                 sources.add(Path(meta['source']).parent.name)
 
+        # Safely get model names
+        models_available = []
+        try:
+            models_response = ollama.list()
+            for model in models_response.get('models', []):
+                model_name = (
+                    model.get('name') or
+                    model.get('model') or
+                    model.get('id') or
+                    str(model)
+                )
+                if model_name:
+                    models_available.append(model_name)
+        except Exception as model_error:
+            logger.warning(f"Failed to get models: {model_error}")
+            models_available = ["llama3"]
+
         return {
             "status": "online",
             "indexed_documents": len(sources),
             "indexed_chunks": doc_count,
             "active_jobs": len(progress_tracker.active_jobs),
             "tracking_method": "polling",
-            "models_available": [m['name'] for m in ollama.list().get('models', [])]
+            "models_available": models_available
         }
     except Exception as e:
         logger.error(f"Status check failed: {e}")
