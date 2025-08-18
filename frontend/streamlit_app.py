@@ -5,7 +5,6 @@ import threading
 import json
 from datetime import datetime
 from typing import Dict, Optional
-import queue
 
 import streamlit as st
 import requests
@@ -25,55 +24,9 @@ st.set_page_config(
     layout="wide"
 )
 
-
-@st.dialog("📤 Upload PDF Files")
-def upload_dialog():
-    st.subheader("Select PDF Files to Upload")
-
-    # File uploader in dialog
-    uploaded_files = st.file_uploader(
-        "Choose PDF files",
-        type=['pdf'],
-        help="Upload Shadowrun rulebooks, session notes, or any other PDF documents",
-        accept_multiple_files=True,
-        key="dialog_file_uploader"
-    )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("✅ Add to Queue", type="primary", use_container_width=True):
-            if uploaded_files:
-                added_count = 0
-                new_files = []
-                for uploaded_file in uploaded_files:
-                    file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-                    if not any(f['id'] == file_id for f in st.session_state.ready_files):
-                        new_files.append({
-                            'id': file_id,
-                            'name': uploaded_file.name,
-                            'size': uploaded_file.size,
-                            'file': uploaded_file
-                        })
-                        added_count += 1
-
-                if added_count > 0:
-                    # Add all new files at once
-                    st.session_state.ready_files.extend(new_files)
-                    st.success(f"Added {added_count} file(s) to upload queue!")
-                    time.sleep(0.5)  # Brief pause to show success message
-                    st.rerun()
-                else:
-                    st.info("No new files added (duplicates ignored)")
-            else:
-                st.warning("Please select at least one file")
-
-    with col2:
-        if st.button("❌ Cancel", use_container_width=True):
-            st.rerun()  # This will close the dialog
-
-# FIXED: Better WebSocket connection management
+# FIXED: Persistent WebSocket connection across reruns
 class PersistentWebSocketHandler:
-    """Improved WebSocket handler with proper connection management."""
+    """Persistent WebSocket handler that survives Streamlit reruns."""
 
     _instance = None
     _lock = threading.Lock()
@@ -90,18 +43,13 @@ class PersistentWebSocketHandler:
             return
 
         self.ws = None
-        self.ws_thread = None
         self.running = False
         self.connected = False
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
         self.global_progress = {}
         self.progress_lock = threading.Lock()
-        self.message_queue = queue.Queue()
-        self.last_ping_time = time.time()
-        self.connection_check_interval = 5  # seconds
         self._initialized = True
-        self._stop_event = threading.Event()
         logger.info("🔧 PersistentWebSocketHandler initialized (singleton)")
 
     def on_message(self, ws, message):
@@ -112,26 +60,8 @@ class PersistentWebSocketHandler:
 
             if job_id:
                 with self.progress_lock:
-                    old_data = self.global_progress.get(job_id, {})
                     self.global_progress[job_id] = data
-
-                    # Check if there's a meaningful change
-                    has_changed = (
-                        old_data.get('progress') != data.get('progress') or
-                        old_data.get('stage') != data.get('stage') or
-                        old_data.get('details') != data.get('details')
-                    )
-
                 logger.info(f"WebSocket progress: {job_id} - {data.get('stage')} ({data.get('progress')}%)")
-
-                # Only trigger UI update if there's a meaningful change
-                if has_changed and 'processing_files' in st.session_state:
-                    # Look for matching file in processing files
-                    for file_id, file_info in st.session_state.processing_files.items():
-                        if file_info.get('job_id') == job_id:
-                            # Set a flag to indicate we need a UI refresh
-                            st.session_state._websocket_update_pending = True
-                            break
 
         except Exception as e:
             logger.error(f"WebSocket message error: {e}")
@@ -139,43 +69,33 @@ class PersistentWebSocketHandler:
     def on_error(self, ws, error):
         """Handle WebSocket errors."""
         logger.warning(f"WebSocket error: {error}")
-        with self.progress_lock:
-            self.connected = False
+        self.connected = False
 
     def on_close(self, ws, close_status_code, close_msg):
         """Handle WebSocket close."""
         logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
-        with self.progress_lock:
-            self.connected = False
-            self.ws = None
+        self.connected = False
+
+        # Attempt reconnection if we were running
+        if self.running and self.reconnect_attempts < self.max_reconnect_attempts:
+            self.reconnect_attempts += 1
+            logger.info(f"Reconnecting WebSocket {self.reconnect_attempts}/{self.max_reconnect_attempts}")
+            time.sleep(min(2 ** self.reconnect_attempts, 30))
+
+            if self.running:
+                self.connect()
 
     def on_open(self, ws):
         """Handle WebSocket open."""
         logger.info("WebSocket connected successfully")
-        with self.progress_lock:
-            self.connected = True
-            self.reconnect_attempts = 0
+        self.connected = True
+        self.reconnect_attempts = 0
 
     def connect(self):
-        """Connect to WebSocket with proper cleanup of existing connections."""
+        """Connect to WebSocket (only if not already connected)."""
         with self.progress_lock:
-            # Clean up existing connection first
-            if self.ws:
-                try:
-                    self.ws.close()
-                except:
-                    pass
-                self.ws = None
-
-            # Stop existing thread
-            if self.ws_thread and self.ws_thread.is_alive():
-                self._stop_event.set()
-                self.running = False
-                # Give thread time to stop
-                self.ws_thread.join(timeout=2)
-
-            # Reset stop event for new connection
-            self._stop_event.clear()
+            if self.connected:
+                return
 
         try:
             ws_url = API_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/progress'
@@ -187,11 +107,8 @@ class PersistentWebSocketHandler:
                 logger.info(f"Backend health check: {health_check.status_code}")
             except Exception as e:
                 logger.error(f"Backend not reachable: {e}")
-                with self.progress_lock:
-                    self.connected = False
-                return False
+                return
 
-            # Create new WebSocket connection
             self.ws = websocket.WebSocketApp(
                 ws_url,
                 on_message=self.on_message,
@@ -200,54 +117,25 @@ class PersistentWebSocketHandler:
                 on_open=self.on_open
             )
 
-            # Start WebSocket in a new thread
-            def run_ws():
-                self.running = True
-                try:
-                    self.ws.run_forever(ping_interval=30, ping_timeout=10)
-                except Exception as e:
-                    logger.error(f"WebSocket run error: {e}")
-                finally:
-                    self.running = False
-                    with self.progress_lock:
-                        self.connected = False
-
-            self.ws_thread = threading.Thread(target=run_ws, daemon=True)
-            self.ws_thread.start()
-
-            # Wait a bit for connection to establish
-            time.sleep(1)
-
-            return self.is_connected()
+            self.running = True
+            self.ws.run_forever()
 
         except Exception as e:
             logger.error(f"WebSocket connection failed: {e}")
             with self.progress_lock:
                 self.connected = False
-            return False
 
     def disconnect(self):
-        """Properly disconnect WebSocket."""
-        logger.info("Disconnecting WebSocket...")
-        self._stop_event.set()
+        """Disconnect WebSocket."""
         self.running = False
-
+        if self.ws:
+            self.ws.close()
         with self.progress_lock:
-            if self.ws:
-                try:
-                    self.ws.close()
-                except:
-                    pass
-                self.ws = None
             self.connected = False
 
     def is_connected(self):
         """Check if WebSocket is connected."""
-        with self.progress_lock:
-            # Also check if thread is alive
-            if self.ws_thread and not self.ws_thread.is_alive():
-                self.connected = False
-            return self.connected
+        return self.connected
 
     def get_progress(self, job_id):
         """Get progress for specific job."""
@@ -259,48 +147,35 @@ class PersistentWebSocketHandler:
         with self.progress_lock:
             return self.global_progress.copy()
 
-    def ensure_connected(self):
-        """Ensure WebSocket is connected, reconnect if needed."""
-        if not self.is_connected():
-            logger.info("WebSocket not connected, attempting to connect...")
-            return self.connect()
-        return True
-
 # Get the singleton WebSocket handler
 websocket_handler = PersistentWebSocketHandler()
 
-# Session state initialization
+# FIXED: Session state initialization (only initialize once)
 if 'session_initialized' not in st.session_state:
     st.session_state.session_initialized = True
     st.session_state.websocket_connected = False
-    st.session_state.connection_check_time = 0
+    st.session_state.websocket_thread = None
     st.session_state.query_input = ""
     st.session_state.ready_files = []
     st.session_state.processing_files = {}
     st.session_state.completed_files = {}
     st.session_state.uploader_key = 0
     st.session_state.last_refresh = time.time()
-    st.session_state._websocket_update_pending = False
-    st.session_state.last_uploaded_files = []
 
-def ensure_websocket_connection():
-    """Ensure WebSocket is connected, with periodic checks."""
-    current_time = time.time()
+def start_websocket_connection():
+    """Start WebSocket connection (only if not already running)."""
+    if not websocket_handler.is_connected() and not st.session_state.websocket_thread:
+        def run_websocket():
+            try:
+                logger.info("Starting WebSocket connection thread...")
+                websocket_handler.connect()
+            except Exception as e:
+                logger.error(f"WebSocket thread error: {e}")
 
-    # Check connection status periodically (every 5 seconds)
-    if current_time - st.session_state.connection_check_time > 5:
-        st.session_state.connection_check_time = current_time
-
-        # Ensure connection
-        connected = websocket_handler.ensure_connected()
-        st.session_state.websocket_connected = connected
-
-        if connected:
-            logger.info("✅ WebSocket connection verified")
-        else:
-            logger.warning("❌ WebSocket connection failed")
-
-    return st.session_state.websocket_connected
+        thread = threading.Thread(target=run_websocket, daemon=True)
+        thread.start()
+        st.session_state.websocket_thread = thread
+        logger.info("WebSocket thread started")
 
 def poll_job_status(job_id: str) -> Optional[Dict]:
     """Poll job status as fallback when WebSocket is unavailable."""
@@ -327,26 +202,15 @@ def sync_websocket_progress():
     """Sync progress from WebSocket handler to session state for UI updates."""
     all_progress = websocket_handler.get_all_progress()
 
-    updated = False
     for job_id, progress_data in all_progress.items():
         for file_id, file_info in st.session_state.processing_files.items():
             if file_info.get('job_id') == job_id:
-                old_progress = file_info.get('progress', 0)
-                old_stage = file_info.get('stage', 'unknown')
-
                 file_info.update({
                     'stage': progress_data.get('stage', 'unknown'),
                     'progress': progress_data.get('progress', 0),
                     'details': progress_data.get('details', ''),
                     'timestamp': progress_data.get('timestamp', time.time())
                 })
-
-                # Only mark as updated if there's actual change
-                if (old_progress != progress_data.get('progress', 0) or
-                    old_stage != progress_data.get('stage', 'unknown')):
-                    updated = True
-
-    return updated
 
 @st.cache_data(ttl=30)
 def get_available_models():
@@ -447,10 +311,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Ensure WebSocket connection on page load - but only once
-if 'websocket_setup_done' not in st.session_state:
-    ensure_websocket_connection()
-    st.session_state.websocket_setup_done = True
+# Start WebSocket connection ONCE
+start_websocket_connection()
 
 # Title and description
 st.title("🎲 Shadowrun RAG Assistant")
@@ -459,10 +321,10 @@ st.markdown("*Your AI-powered guide to the Sixth World*")
 # Connection status indicator
 col1, col2 = st.columns([4, 1])
 with col2:
-    # Check actual connection status
-    is_connected = websocket_handler.is_connected()
+    # Update session state from persistent WebSocket handler
+    st.session_state.websocket_connected = websocket_handler.is_connected()
 
-    if is_connected:
+    if st.session_state.websocket_connected:
         st.markdown('<span class="status-indicator status-connected"></span>**WebSocket Connected**',
                    unsafe_allow_html=True)
     else:
@@ -471,38 +333,23 @@ with col2:
 
 # Debug info
 with st.expander("🔧 WebSocket Debug Info"):
-    status_info = api_request("/status", timeout=5)
-
     st.write(f"**WebSocket URL:** {API_URL.replace('http://', 'ws://').replace('https://', 'wss://')}/ws/progress")
-    st.write(f"**Frontend connected:** {websocket_handler.is_connected()}")
-    st.write(f"**Backend connections:** {status_info.get('websocket_connections', 0) if status_info else 'Unknown'}")
-    st.write(f"**Active jobs:** {status_info.get('active_jobs', 0) if status_info else 'Unknown'}")
+    st.write(f"**Thread alive:** {st.session_state.websocket_thread and st.session_state.websocket_thread.is_alive() if st.session_state.websocket_thread else 'No thread'}")
+    st.write(f"**Handler connected:** {websocket_handler.is_connected()}")
+    st.write(f"**Reconnect attempts:** {websocket_handler.reconnect_attempts}")
 
-    if status_info and status_info.get('active_job_details'):
-        st.write("**Active Job Details:**")
-        for job in status_info['active_job_details']:
-            st.write(f"  - Job {job['job_id']}: {job['stage']} ({job['progress']}%)")
+    if st.button("🔄 Force Reconnect"):
+        # Reset the connection
+        st.session_state.websocket_thread = None
+        websocket_handler.disconnect()
+        websocket_handler.reconnect_attempts = 0
+        start_websocket_connection()
+        st.rerun()
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("🔄 Reconnect WebSocket"):
-            websocket_handler.disconnect()
-            time.sleep(0.5)
-            if websocket_handler.connect():
-                st.success("WebSocket reconnected!")
-            else:
-                st.error("Failed to reconnect")
-            st.rerun()
-
-    with col2:
-        if st.button("🔌 Disconnect WebSocket"):
-            websocket_handler.disconnect()
-            st.warning("WebSocket disconnected")
-            st.rerun()
-
-    with col3:
-        if st.button("🔃 Refresh Status"):
-            st.rerun()
+# Auto-refresh (only when needed)
+if not st.session_state.processing_files and (time.time() - st.session_state.last_refresh) > 30:
+    st.session_state.last_refresh = time.time()
+    st.rerun()
 
 # Sidebar
 with st.sidebar:
@@ -651,23 +498,15 @@ with tab1:
 with tab2:
     st.header("Upload PDFs")
 
-    # ENSURE WEBSOCKET CONNECTION IS ACTIVE
-    ensure_websocket_connection()
-
-    # Process pending actions FIRST - but handle them more carefully
-    action_processed = False
+    # Process pending actions
     if 'action' in st.session_state:
         action = st.session_state.action
 
         if action['type'] == 'clear_all':
             st.session_state.ready_files = []
             st.session_state.uploader_key += 1
-            action_processed = True
 
         elif action['type'] == 'process_all':
-            # Ensure WebSocket connection before processing
-            ensure_websocket_connection()
-
             st.session_state.upload_queue = st.session_state.get('upload_queue', [])
 
             for file_info in st.session_state.ready_files:
@@ -690,19 +529,14 @@ with tab2:
 
             st.session_state.ready_files = []
             st.session_state.uploader_key += 1
-            action_processed = True
 
         elif action['type'] == 'remove_file':
             file_id = action['file_id']
             st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
             if not st.session_state.ready_files:
                 st.session_state.uploader_key += 1
-            action_processed = True
 
         elif action['type'] == 'process_file':
-            # Ensure WebSocket connection before processing
-            ensure_websocket_connection()
-
             file_id = action['file_id']
             file_info = next((f for f in st.session_state.ready_files if f['id'] == file_id), None)
 
@@ -728,14 +562,11 @@ with tab2:
                 st.session_state.ready_files = [f for f in st.session_state.ready_files if f['id'] != file_id]
                 if not st.session_state.ready_files:
                     st.session_state.uploader_key += 1
-            action_processed = True
 
-        # Only remove action and rerun if we actually processed something
-        if action_processed:
-            del st.session_state.action
-            st.rerun()
+        del st.session_state.action
+        st.rerun()
 
-    # Process upload queue IMMEDIATELY after action processing
+    # Process upload queue
     if 'upload_queue' in st.session_state and st.session_state.upload_queue:
         upload_item = st.session_state.upload_queue.pop(0)
         file_id = upload_item['file_id']
@@ -768,30 +599,42 @@ with tab2:
                 st.error(f"❌ Upload error for {upload_item['name']}: {str(e)}")
                 del st.session_state.processing_files[file_id]
 
-        # Only rerun if there are more items in the queue
         if st.session_state.upload_queue:
             st.rerun()
-    # Add Upload Button (opens true modal dialog)
 
-    st.markdown("---")
-    if st.button("📥 Upload New Files", type="primary"):
-        upload_dialog()
+    # File uploader
+    uploaded_files = st.file_uploader(
+        "Choose PDF files",
+        type=['pdf'],
+        help="Upload Shadowrun rulebooks, session notes, or any other PDF documents",
+        accept_multiple_files=True,
+        key=f"pdf_uploader_{st.session_state.uploader_key}"
+    )
+
+    # Add uploaded files
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+            if not any(f['id'] == file_id for f in st.session_state.ready_files):
+                st.session_state.ready_files.append({
+                    'id': file_id,
+                    'name': uploaded_file.name,
+                    'size': uploaded_file.size,
+                    'file': uploaded_file
+                })
 
     # Ready to Process Section
     if st.session_state.ready_files:
         st.markdown("---")
         st.subheader("📁 Ready to Process")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("📤 Process All", type="primary", key="process_all_btn"):
-                st.session_state.action = {'type': 'process_all'}
-                st.rerun()
+        if st.button("📤 Process All", type="primary"):
+            st.session_state.action = {'type': 'process_all'}
+            st.rerun()
 
-        with col2:
-            if st.button("🗑️ Clear All", key="clear_all_btn"):
-                st.session_state.action = {'type': 'clear_all'}
-                st.rerun()
+        if st.button("🗑️ Clear All"):
+            st.session_state.action = {'type': 'clear_all'}
+            st.rerun()
 
         for file_info in st.session_state.ready_files:
             st.write(f"📄 **{file_info['name']}** ({file_info['size'] / 1024:.1f} KB)")
@@ -806,19 +649,12 @@ with tab2:
                     st.session_state.action = {'type': 'remove_file', 'file_id': file_info['id']}
                     st.rerun()
 
-    # Processing display - NO AUTO REFRESH HERE
+    # Processing display
     if st.session_state.processing_files:
         st.markdown("---")
         st.subheader("🔄 Processing Files")
 
-        # Sync progress from WebSocket to session state
         sync_websocket_progress()
-
-        # Check if we have pending WebSocket updates
-        if st.session_state._websocket_update_pending:
-            st.session_state._websocket_update_pending = False
-            # This will cause a re-render to show the updated progress
-            st.rerun()
 
         for file_id, file_info in list(st.session_state.processing_files.items()):
             job_id = file_info.get('job_id')
@@ -863,7 +699,6 @@ with tab2:
                 'cleaning': ('🧹', 'Cleaning Content'),
                 'chunking': ('✂️', 'Creating Chunks'),
                 'chunking_complete': ('✅', 'Chunking Complete'),
-                'indexing': ('📚', 'Indexing Content'),
                 'saving': ('💾', 'Saving Files'),
                 'complete': ('🎉', 'Complete'),
                 'error': ('❌', 'Error'),
@@ -900,8 +735,6 @@ with tab2:
                 st.info("🔍 **High-resolution extraction** - Processing document layout and structure...")
             elif current_stage == 'chunking':
                 st.info("✂️ **Creating semantic chunks** - Breaking document into searchable sections...")
-            elif current_stage == 'indexing':
-                st.info("📚 **Indexing content** - Adding to searchable database...")
 
             if current_stage == 'complete':
                 st.session_state.completed_files[file_id] = file_info
@@ -915,6 +748,15 @@ with tab2:
                 st.rerun()
 
             st.markdown("---")
+
+        # Smart refresh logic
+        if st.session_state.processing_files:
+            if websocket_handler.is_connected():
+                time.sleep(1)
+                st.rerun()
+            else:
+                time.sleep(3)
+                st.rerun()
 
     # Completed section
     if st.session_state.completed_files:
@@ -930,12 +772,6 @@ with tab2:
                 st.success(f"✅ **{file_info['name']}** - Successfully processed!")
                 if file_info.get('details'):
                     st.caption(f"Result: {file_info['details']}")
-
-    # Check for WebSocket updates without constant refreshing
-    if st.session_state.processing_files and st.session_state._websocket_update_pending:
-        st.session_state._websocket_update_pending = False
-        time.sleep(0.1)  # Small delay to let updates settle
-        st.rerun()
 
     # Manual indexing
     st.markdown("---")
@@ -958,42 +794,18 @@ with tab2:
 
 with tab3:
     st.header("📚 Document Library")
-
-    documents = get_available_documents()
-    if documents:
-        st.info(f"📚 Found {len(documents)} indexed documents")
-
-        # Display documents in a grid
-        cols = st.columns(3)
-        for i, doc in enumerate(documents):
-            with cols[i % 3]:
-                doc_name = Path(doc).name
-                st.markdown(f"""
-                <div class="source-box">
-                    📄 <strong>{doc_name}</strong>
-                </div>
-                """, unsafe_allow_html=True)
-    else:
-        st.info("📭 No documents indexed yet. Upload PDFs in the Upload tab to get started!")
+    st.info("📭 No documents indexed yet. Upload PDFs in the Upload tab to get started!")
 
 with tab4:
     st.header("📝 Session Notes")
     st.info("🔧 Session notes functionality coming soon!")
-    st.markdown("""
-    ### Planned Features:
-    - 📅 Session calendar and scheduling
-    - 📝 Automatic session summary generation
-    - 🎭 NPC tracking and relationship maps
-    - 🗺️ Location and plot thread management
-    - 📊 Character progression tracking
-    """)
 
 # Footer
 st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center'>
-        <small>🎲 Shadowrun RAG Assistant v2.0 | WebSocket Connection Fixed | Powered by Ollama & ChromaDB</small>
+        <small>🎲 Shadowrun RAG Assistant v2.0 | Persistent WebSocket | Powered by Ollama & ChromaDB</small>
     </div>
     """,
     unsafe_allow_html=True
