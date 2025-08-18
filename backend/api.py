@@ -1,4 +1,4 @@
-"""FastAPI backend server with FIXED WebSocket progress tracking using global state."""
+"""FastAPI backend server with FIXED WebSocket progress tracking using synchronous callbacks."""
 import ollama
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,35 +32,70 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# GLOBAL progress tracking (NOT session-dependent)
+# GLOBAL progress tracking with automatic cleanup
 class GlobalProgressTracker:
-    """Global progress tracker that survives WebSocket disconnections."""
+    """Global progress tracker with automatic cleanup and synchronous updates."""
 
     def __init__(self):
         self.active_jobs: Dict[str, Dict] = {}
         self.websocket_connections: Set[WebSocket] = set()
-        self.lock = asyncio.Lock()
+        self.lock = threading.Lock()  # Use threading lock for sync operations
+        self.cleanup_tasks: Dict[str, asyncio.Task] = {}
         logger.info("🔧 GlobalProgressTracker initialized")
 
-    async def update_progress(self, job_id: str, stage: str, progress: float, details: str = ""):
-        """Update progress and broadcast to ALL connected clients."""
-        progress_data = {
-            "job_id": job_id,
-            "stage": stage,
-            "progress": max(0, min(100, progress)),  # Clamp 0-100
-            "details": details,
-            "timestamp": time.time()
-        }
+    def update_progress_sync(self, job_id: str, stage: str, progress: float, details: str = ""):
+        """Synchronous progress update - called from PDF processor thread."""
 
-        async with self.lock:
-            # Store globally (survives disconnections)
-            self.active_jobs[job_id] = progress_data
+        # Prevent recursion - check if we're already processing this exact update
+        progress_key = f"{job_id}:{stage}:{progress}"
+        if hasattr(self, '_in_progress_update') and self._in_progress_update == progress_key:
+            logger.warning(f"Preventing recursive progress update for {progress_key}")
+            return
 
-        # Broadcast to ALL connected WebSocket clients
-        await self.broadcast_to_all(progress_data)
+        self._in_progress_update = progress_key
 
-        # Also log for debugging
-        logger.info(f"Progress [{job_id}]: {stage} ({progress}%) - {details}")
+        try:
+            progress_data = {
+                "job_id": job_id,
+                "stage": stage,
+                "progress": max(0, min(100, progress)),  # Clamp 0-100
+                "details": details,
+                "timestamp": time.time()
+            }
+
+            with self.lock:
+                # Store globally (survives disconnections)
+                self.active_jobs[job_id] = progress_data
+
+            # Schedule async broadcast in the main event loop
+            try:
+                # Get the main event loop safely
+                loop = asyncio.get_event_loop()
+                if loop and loop.is_running():
+                    # Schedule coroutine to run in the main loop
+                    asyncio.run_coroutine_threadsafe(
+                        self.broadcast_to_all(progress_data),
+                        loop
+                    )
+                else:
+                    logger.warning("No running event loop found for broadcast")
+            except RuntimeError:
+                # Handle case where there's no event loop in this thread
+                logger.warning("No event loop available in current thread for broadcast")
+            except Exception as e:
+                logger.warning(f"Could not schedule broadcast: {e}")
+
+            # Log for debugging
+            logger.info(f"Progress [{job_id}]: {stage} ({progress}%) - {details}")
+
+            # Schedule cleanup if complete or error
+            if stage in ["complete", "error"] and job_id not in self.cleanup_tasks:
+                self._schedule_cleanup(job_id)
+
+        finally:
+            # Clear recursion guard
+            if hasattr(self, '_in_progress_update') and self._in_progress_update == progress_key:
+                delattr(self, '_in_progress_update')
 
     async def broadcast_to_all(self, message: dict):
         """Broadcast message to all connected WebSocket clients."""
@@ -92,7 +127,7 @@ class GlobalProgressTracker:
         logger.info(f"✅ WebSocket connected. Total connections: {len(self.websocket_connections)}")
 
         # Send current active jobs to new connection
-        async with self.lock:
+        with self.lock:
             for job_data in self.active_jobs.values():
                 try:
                     await websocket.send_text(json.dumps(job_data))
@@ -107,15 +142,51 @@ class GlobalProgressTracker:
 
     def get_job_status(self, job_id: str) -> Optional[Dict]:
         """Get current job status (for polling fallback)."""
-        return self.active_jobs.get(job_id)
+        with self.lock:
+            return self.active_jobs.get(job_id)
 
-    async def cleanup_job(self, job_id: str, delay: int = 30):
+    def _schedule_cleanup(self, job_id: str):
+        """Schedule job cleanup after completion."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                task = asyncio.run_coroutine_threadsafe(
+                    self._cleanup_job_async(job_id, delay=30),
+                    loop
+                )
+                self.cleanup_tasks[job_id] = task
+        except Exception as e:
+            logger.warning(f"Could not schedule cleanup for {job_id}: {e}")
+
+    async def _cleanup_job_async(self, job_id: str, delay: int = 30):
         """Remove completed job after delay."""
         await asyncio.sleep(delay)
-        async with self.lock:
+        with self.lock:
             if job_id in self.active_jobs:
+                status = self.active_jobs[job_id].get('stage')
+                if status in ['complete', 'error']:
+                    del self.active_jobs[job_id]
+                    logger.info(f"🧹 Cleaned up completed job: {job_id}")
+
+        # Remove from cleanup tasks
+        if job_id in self.cleanup_tasks:
+            del self.cleanup_tasks[job_id]
+
+    def clear_stale_jobs(self, max_age_seconds: int = 3600):
+        """Clear jobs older than max_age_seconds."""
+        current_time = time.time()
+        with self.lock:
+            stale_jobs = []
+            for job_id, job_data in self.active_jobs.items():
+                age = current_time - job_data.get('timestamp', current_time)
+                if age > max_age_seconds:
+                    stale_jobs.append(job_id)
+
+            for job_id in stale_jobs:
                 del self.active_jobs[job_id]
-                logger.info(f"🧹 Cleaned up job: {job_id}")
+                logger.info(f"🧹 Cleared stale job: {job_id}")
+
+            return len(stale_jobs)
 
 # Global tracker instance - Initialize immediately
 progress_tracker = GlobalProgressTracker()
@@ -126,6 +197,24 @@ executor = ThreadPoolExecutor(max_workers=2)
 # Initialize components
 indexer = IncrementalIndexer()
 retriever = Retriever()
+
+# Periodic cleanup task
+async def periodic_cleanup():
+    """Background task to clean up stale jobs periodically."""
+    while True:
+        await asyncio.sleep(600)  # Every 10 minutes
+        try:
+            cleared = progress_tracker.clear_stale_jobs(max_age_seconds=3600)
+            if cleared > 0:
+                logger.info(f"Periodic cleanup: cleared {cleared} stale jobs")
+        except Exception as e:
+            logger.error(f"Periodic cleanup error: {e}")
+
+# Start cleanup task on startup
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(periodic_cleanup())
+    logger.info("🚀 Started periodic cleanup task")
 
 # Log initialization
 logger.info("🚀 FastAPI app initialized with components:")
@@ -148,6 +237,43 @@ class QueryRequest(BaseModel):
 class IndexRequest(BaseModel):
     directory: str = "data/processed_markdown"
     force_reindex: bool = False
+
+def process_pdf_with_sync_progress(pdf_path: str, job_id: str):
+    """Process PDF with synchronous progress callback."""
+    try:
+        # Create processor with synchronous progress callback
+        def sync_progress_callback(job_id: str, stage: str, progress: float, details: str):
+            # Add recursion protection here too
+            try:
+                progress_tracker.update_progress_sync(job_id, stage, progress, details)
+            except Exception as e:
+                logger.warning(f"Progress update failed: {e}")
+
+        processor = PDFProcessor(progress_callback=sync_progress_callback)
+
+        # Initial progress
+        progress_tracker.update_progress_sync(job_id, "starting", 5, "Initializing PDF processing...")
+
+        # Process the PDF
+        result = processor.process_pdf(pdf_path, force_reparse=True, job_id=job_id)
+
+        # Index the results
+        progress_tracker.update_progress_sync(job_id, "indexing", 95, "Indexing processed content...")
+        indexer.index_directory("data/processed_markdown")
+
+        # Complete
+        progress_tracker.update_progress_sync(job_id, "complete", 100, f"Processing complete! Created {len(result)} files.")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"PDF processing failed: {e}")
+        logger.error(traceback.format_exc())
+        try:
+            progress_tracker.update_progress_sync(job_id, "error", -1, f"Processing failed: {str(e)}")
+        except:
+            pass  # Ignore errors in error handling
+        raise
 
 @app.websocket("/ws/progress")
 async def websocket_endpoint(websocket: WebSocket):
@@ -186,50 +312,6 @@ def root():
         "active_jobs": len(progress_tracker.active_jobs)
     }
 
-async def process_pdf_with_real_progress(pdf_path: str, job_id: str):
-    """Process PDF with REAL progress tracking from unstructured logs."""
-
-    def cpu_intensive_processing():
-        """Run PDF processing in thread with progress tracking."""
-        try:
-            # Create processor with progress callback
-            processor = PDFProcessor(progress_callback=lambda stage, progress, details:
-                asyncio.create_task(progress_tracker.update_progress(job_id, stage, progress, details))
-            )
-
-            # Process the PDF (this hooks into unstructured logging)
-            result = processor.process_pdf(pdf_path, force_reparse=True)
-
-            # Index the results
-            indexer.index_directory("data/processed_markdown")
-
-            return result
-
-        except Exception as e:
-            logger.error(f"PDF processing failed: {e}")
-            raise e
-
-    try:
-        await progress_tracker.update_progress(job_id, "starting", 5, "Initializing PDF processing...")
-
-        # Run CPU-intensive work in thread pool
-        result = await asyncio.get_event_loop().run_in_executor(
-            executor, cpu_intensive_processing
-        )
-
-        await progress_tracker.update_progress(job_id, "complete", 100, f"Processing complete! Created {len(result)} files.")
-
-        # Schedule cleanup
-        asyncio.create_task(progress_tracker.cleanup_job(job_id))
-
-        return result
-
-    except Exception as e:
-        await progress_tracker.update_progress(job_id, "error", -1, f"Processing failed: {str(e)}")
-        logger.error(f"Processing failed: {e}")
-        logger.error(traceback.format_exc())
-        raise
-
 @app.post("/upload")
 async def upload_pdf_with_progress(file: UploadFile = File(...)):
     """Upload and process a PDF with real-time progress tracking."""
@@ -247,17 +329,14 @@ async def upload_pdf_with_progress(file: UploadFile = File(...)):
         content = await file.read()
         save_path.write_bytes(content)
 
-        # Start processing in background thread
-        def start_processing():
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            loop = asyncio.get_event_loop()
-            try:
-                loop.run_until_complete(process_pdf_with_real_progress(str(save_path), job_id))
-            finally:
-                loop.close()
-
-        thread = threading.Thread(target=start_processing, daemon=True)
-        thread.start()
+        # Process in background using thread pool
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(
+            executor,
+            process_pdf_with_sync_progress,
+            str(save_path),
+            job_id
+        )
 
         return {
             "job_id": job_id,
@@ -457,13 +536,40 @@ async def status():
             if meta and 'source' in meta:
                 sources.add(Path(meta['source']).parent.name)
 
+        # Include active job info
+        active_job_summary = []
+        for job_id, job_data in progress_tracker.active_jobs.items():
+            active_job_summary.append({
+                "job_id": job_id[-8:],  # Last 8 chars for privacy
+                "stage": job_data.get("stage"),
+                "progress": job_data.get("progress")
+            })
+
+        # Safer model list retrieval
+        try:
+            models_list = ollama.list().get('models', [])
+            model_names = []
+            for m in models_list:
+                if isinstance(m, dict):
+                    # Try different possible keys for model name
+                    model_name = m.get('name') or m.get('model') or m.get('id') or str(m)
+                    if model_name:
+                        model_names.append(model_name)
+                else:
+                    model_names.append(str(m))
+            models_available = model_names
+        except Exception as e:
+            logger.error(f"Error getting model list: {e}")
+            models_available = ["llama3"]  # fallback
+
         return {
             "status": "online",
             "indexed_documents": len(sources),
             "indexed_chunks": doc_count,
             "active_jobs": len(progress_tracker.active_jobs),
+            "active_job_details": active_job_summary,
             "websocket_connections": len(progress_tracker.websocket_connections),
-            "models_available": [m['name'] for m in ollama.list().get('models', [])]
+            "models_available": models_available
         }
     except Exception as e:
         logger.error(f"Status check failed: {e}")
