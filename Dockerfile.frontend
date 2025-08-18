@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install
-COPY frontend/gradio_requirements.txt ./
-RUN pip install --no-cache-dir -r gradio_requirements.txt
+COPY frontend/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
 COPY frontend/gradio_app.py ./
