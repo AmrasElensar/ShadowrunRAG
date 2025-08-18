@@ -1,28 +1,25 @@
-
 FROM python:3.11.9-slim
 
 WORKDIR /app
 
 # Install system dependencies
-# libglib2.0-0 fixes Streamlit startup issues
 RUN apt-get update && apt-get install -y \
-    libglib2.0-0 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy frontend requirements and install minimal dependencies
-COPY frontend/requirements.txt ./frontend/
-RUN pip install --no-cache-dir -r frontend/requirements.txt
+# Copy requirements and install
+COPY frontend/gradio_requirements.txt ./
+RUN pip install --no-cache-dir -r gradio_requirements.txt
 
-# Copy frontend code
-COPY frontend/ ./frontend/
+# Copy application
+COPY frontend/gradio_app.py ./
 
-# Expose Streamlit port
-EXPOSE 8501
+# Expose Gradio port
+EXPOSE 7860
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8501/_stcore/health || exit 1
+  CMD curl -f http://localhost:7860/ || exit 1
 
-# Run Streamlit
-CMD ["streamlit", "run", "frontend/streamlit_app.py", "--server.address=0.0.0.0"]
+# Run Gradio
+CMD ["python", "gradio_app.py"]
