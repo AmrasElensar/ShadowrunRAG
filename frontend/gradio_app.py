@@ -120,6 +120,30 @@ class RAGClient:
             logger.error(f"Failed to fetch documents: {e}")
             return []
 
+    def get_document_content(self, file_path: str) -> Dict:
+        """Get content of a specific document."""
+        try:
+            response = requests.get(f"{self.api_url}/document/{file_path}", timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch document content: {e}")
+            return {"error": str(e)}
+
+    def search_documents(self, query: str, group: str = None, page: int = 1, page_size: int = 20) -> Dict:
+        """Search documents by content and filename."""
+        try:
+            response = requests.post(
+                f"{self.api_url}/search_documents",
+                json={"query": query, "group": group, "page": page, "page_size": page_size},
+                timeout=15
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return {"error": str(e)}
+
     def get_status(self) -> Dict:
         """Get system status."""
         try:
@@ -281,12 +305,12 @@ def submit_query(
 # ===== DOCUMENT TAB FUNCTIONS =====
 
 def refresh_documents():
-    """Refresh document library display."""
+    """Refresh document library with enhanced display."""
     docs = client.get_documents()
     status = client.get_status()
 
     if not docs:
-        return "No documents indexed yet", "", {}
+        return "No documents indexed yet", "", {}, "", gr.update(choices=[])
 
     # Group documents
     doc_groups = {}
@@ -303,15 +327,13 @@ def refresh_documents():
                 doc_groups["other"] = []
             doc_groups["other"].append(str(doc_path))
 
-    # Format document list
-    doc_text = f"**Total: {len(docs)} documents indexed**\n\n"
+    # Format document list with expandable groups
+    doc_text = f"**Total: {len(docs)} documents in {len(doc_groups)} groups**\n\n"
+    group_choices = ["All Groups"] + list(doc_groups.keys())
+
     for group, files in doc_groups.items():
         doc_text += f"📁 **{group}** ({len(files)} files)\n"
-        for file in sorted(files)[:5]:  # Show first 5
-            doc_text += f"   📄 {file}\n"
-        if len(files) > 5:
-            doc_text += f"   ... and {len(files) - 5} more\n"
-        doc_text += "\n"
+        doc_text += f"   Use search or select group to view files\n\n"
 
     # Format statistics
     stats_text = f"""
@@ -322,15 +344,73 @@ def refresh_documents():
 - Status: {status.get('status', 'unknown')}
 """
 
-    # Create dataframe for better display
     stats_df = pd.DataFrame([
         {"Metric": "Documents", "Value": status.get('indexed_documents', 0)},
         {"Metric": "Text Chunks", "Value": status.get('indexed_chunks', 0)},
-        {"Metric": "Avg Chunks/Doc", "Value": f"{status.get('indexed_chunks', 0) / max(status.get('indexed_documents', 1), 1):.1f}"},
+        {"Metric": "Avg Chunks/Doc",
+         "Value": f"{status.get('indexed_chunks', 0) / max(status.get('indexed_documents', 1), 1):.1f}"},
         {"Metric": "Active Jobs", "Value": status.get('active_jobs', 0)},
     ])
 
-    return doc_text, stats_text, stats_df
+    return doc_text, stats_text, stats_df, "", gr.update(choices=group_choices)
+
+
+def search_docs_fn(query: str, selected_group: str, page: int = 1):
+    """Search documents and return formatted results."""
+    if not query.strip():
+        return "Enter a search query", gr.update(visible=False), gr.update(visible=False)
+
+    group_filter = None if selected_group == "All Groups" else selected_group
+    results = client.search_documents(query, group_filter, page, 20)
+
+    if "error" in results:
+        return f"Search error: {results['error']}", gr.update(visible=False), gr.update(visible=False)
+
+    files = results.get("results", [])
+    total = results.get("total", 0)
+    current_page = results.get("page", 1)
+    total_pages = results.get("total_pages", 1)
+
+    if not files:
+        return "No files found", gr.update(visible=False), gr.update(visible=False)
+
+    # Format results
+    results_text = f"**Found {total} files** (Page {current_page}/{total_pages})\n\n"
+    file_choices = []
+
+    for file_info in files:
+        match_type = file_info.get("match_type", "")
+        match_indicator = {"filename": "📝", "content": "🔍", "all": "📄"}.get(match_type, "📄")
+
+        results_text += f"{match_indicator} **{file_info['filename']}**\n"
+        results_text += f"   Group: {file_info['group']} | Match: {match_type}\n\n"
+
+        file_choices.append(file_info['file_path'])
+
+    # Pagination controls
+    if total_pages > 1:
+        results_text += f"\n**Page {current_page} of {total_pages}**"
+
+    return results_text, gr.update(visible=True, choices=file_choices), gr.update(visible=True)
+
+
+def load_document_content(file_path: str):
+    """Load and display document content."""
+    if not file_path:
+        return "Select a file to view its content"
+
+    result = client.get_document_content(file_path)
+
+    if "error" in result:
+        return f"Error loading file: {result['error']}"
+
+    content = result.get("content", "")
+    filename = Path(file_path).name
+
+    # Format with header
+    formatted_content = f"# 📄 {filename}\n\n---\n\n{content}"
+
+    return formatted_content
 
 def reindex_documents(force_reindex: bool):
     """Trigger document reindexing."""
@@ -515,29 +595,82 @@ def build_interface():
                     outputs=[progress_status, progress_display, gr.State()]
                 )
 
-            # ===== DOCUMENTS TAB =====
-            with gr.Tab("📚 Documents"):
-                refresh_docs_btn = gr.Button("🔄 Refresh Document Library")
+                # ===== DOCUMENTS TAB =====
+                with gr.Tab("📚 Documents"):
+                    with gr.Row():
+                        # Left Panel - Document Library & Search
+                        with gr.Column(scale=1):
+                            refresh_docs_btn = gr.Button("🔄 Refresh Document Library")
 
-                with gr.Row():
-                    with gr.Column():
-                        docs_display = gr.Markdown(label="Document Library")
+                            # Search Section
+                            with gr.Group():
+                                gr.Markdown("### 🔍 Search Documents")
+                                with gr.Row():
+                                    search_query = gr.Textbox(
+                                        label="Search Query",
+                                        placeholder="Search filenames and content...",
+                                        scale=2
+                                    )
+                                    group_filter = gr.Dropdown(
+                                        label="Filter by Group",
+                                        choices=["All Groups"],
+                                        value="All Groups",
+                                        scale=1
+                                    )
+                                search_btn = gr.Button("🔍 Search", variant="primary")
 
-                    with gr.Column():
-                        stats_display = gr.Markdown(label="Statistics")
-                        stats_table = gr.Dataframe(label="Metrics")
+                            # Results Section
+                            search_results = gr.Markdown(label="Search Results")
+                            file_selector = gr.Dropdown(
+                                label="Select File to View",
+                                choices=[],
+                                visible=False,
+                                interactive=True
+                            )
 
-                # Wire up document refresh
-                refresh_docs_btn.click(
-                    fn=refresh_documents,
-                    outputs=[docs_display, stats_display, stats_table]
-                )
+                            # Library Overview
+                            with gr.Group():
+                                gr.Markdown("### 📚 Document Library")
+                                docs_display = gr.Markdown(label="Documents Overview")
 
-                # Load documents on tab load
-                app.load(
-                    fn=refresh_documents,
-                    outputs=[docs_display, stats_display, stats_table]
-                )
+                            # Statistics
+                            with gr.Group():
+                                gr.Markdown("### 📊 Statistics")
+                                stats_display = gr.Markdown(label="System Stats")
+                                stats_table = gr.Dataframe(label="Metrics")
+
+                        # Right Panel - Document Viewer
+                        with gr.Column(scale=1):
+                            gr.Markdown("### 📖 Document Viewer")
+                            document_content = gr.Markdown(
+                                value="Select a file from search results to view its content",
+                                label="Content",
+                                elem_classes=["document-viewer"]
+                            )
+
+                    # Wire up functionality
+                    refresh_docs_btn.click(
+                        fn=refresh_documents,
+                        outputs=[docs_display, stats_display, stats_table, search_query, group_filter]
+                    )
+
+                    search_btn.click(
+                        fn=search_docs_fn,
+                        inputs=[search_query, group_filter],
+                        outputs=[search_results, file_selector, file_selector]  # Last one controls visibility
+                    )
+
+                    file_selector.change(
+                        fn=load_document_content,
+                        inputs=[file_selector],
+                        outputs=[document_content]
+                    )
+
+                    # Load on tab initialization
+                    app.load(
+                        fn=refresh_documents,
+                        outputs=[docs_display, stats_display, stats_table, search_query, group_filter]
+                    )
 
             # ===== SESSION NOTES TAB =====
             with gr.Tab("📝 Session Notes"):

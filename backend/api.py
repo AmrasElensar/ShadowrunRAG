@@ -377,6 +377,87 @@ async def list_documents():
         logger.error(f"Error listing documents: {e}")
         return DocumentsResponse(documents=[])
 
+
+@app.get("/document/{file_path:path}")
+async def get_document_content(file_path: str):
+    """Get content of a specific document file."""
+    try:
+        # Resolve the full path safely
+        full_path = Path("data/processed_markdown") / file_path
+
+        # Security check - ensure path is within allowed directory
+        if not str(full_path.resolve()).startswith(str(Path("data/processed_markdown").resolve())):
+            raise HTTPException(400, "Invalid file path")
+
+        if not full_path.exists():
+            raise HTTPException(404, "File not found")
+
+        content = full_path.read_text(encoding='utf-8')
+        return {"content": content, "file_path": file_path}
+
+    except Exception as e:
+        logger.error(f"Error reading file {file_path}: {e}")
+        raise HTTPException(500, f"Error reading file: {str(e)}")
+
+
+@app.post("/search_documents")
+async def search_documents(request: dict):
+    """Search documents by filename and content."""
+    try:
+        query = request.get("query", "").lower()
+        group_filter = request.get("group")
+        page = request.get("page", 1)
+        page_size = request.get("page_size", 20)
+
+        processed_dir = Path("data/processed_markdown")
+        results = []
+
+        for file_path in processed_dir.rglob("*.md"):
+            group_name = file_path.parent.name
+
+            # Filter by group if specified
+            if group_filter and group_name != group_filter:
+                continue
+
+            # Search filename
+            filename_match = query in file_path.name.lower()
+            content_match = False
+
+            # Search content if no filename match
+            if not filename_match and query:
+                try:
+                    content = file_path.read_text(encoding='utf-8')
+                    content_match = query in content.lower()
+                except:
+                    content_match = False
+
+            if not query or filename_match or content_match:
+                relative_path = str(file_path.relative_to(processed_dir))
+                results.append({
+                    "file_path": relative_path,
+                    "filename": file_path.name,
+                    "group": group_name,
+                    "match_type": "filename" if filename_match else "content" if content_match else "all"
+                })
+
+        # Pagination
+        total = len(results)
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated_results = results[start:end]
+
+        return {
+            "results": paginated_results,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size
+        }
+
+    except Exception as e:
+        logger.error(f"Search error: {e}")
+        raise HTTPException(500, str(e))
+
 @app.get("/models", response_model=ModelsResponse)
 async def list_models():
     """List available Ollama models."""
