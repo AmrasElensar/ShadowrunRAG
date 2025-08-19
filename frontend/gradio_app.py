@@ -6,12 +6,11 @@ Replaces Streamlit with better state management and streaming support
 import gradio as gr
 import requests
 import json
-import time
+
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 import threading
 import logging
-from datetime import datetime
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
@@ -136,7 +135,7 @@ class RAGClient:
             response = requests.post(
                 f"{self.api_url}/search_documents",
                 json={"query": query, "group": group, "page": page, "page_size": page_size},
-                timeout=15
+                timeout=60
             )
             response.raise_for_status()
             return response.json()
@@ -285,17 +284,17 @@ def submit_query(
                 sources_list = [Path(s).name for s in metadata["sources"]]
                 sources_text = "**Sources:**\n" + "\n".join([f"📄 {s}" for s in sources_list])
 
-            # Create chunks dataframe for display
+            # Create chunks dataframe for display - fix format
             chunks_data = []
             if metadata.get("chunks"):
                 for i, (chunk, dist) in enumerate(zip(
-                    metadata.get("chunks", []),
-                    metadata.get("distances", [])
+                        metadata.get("chunks", []),
+                        metadata.get("distances", [])
                 )):
-                    chunks_data.append({
-                        "Relevance": f"{(1 - dist):.2%}" if dist else "N/A",
-                        "Content": chunk[:200] + "..." if len(chunk) > 200 else chunk
-                    })
+                    # Gradio Dataframe expects list of lists, not list of dicts
+                    relevance = f"{(1 - dist):.2%}" if dist else "N/A"
+                    content = chunk[:200] + "..." if len(chunk) > 200 else chunk
+                    chunks_data.append([relevance, content])  # List instead of dict
 
             yield response, sources_text, chunks_data
         else:
@@ -305,66 +304,104 @@ def submit_query(
 # ===== DOCUMENT TAB FUNCTIONS =====
 
 def refresh_documents():
-    """Refresh document library with enhanced display."""
+    """Refresh document library with accordion structure."""
     docs = client.get_documents()
     status = client.get_status()
 
     if not docs:
-        return "No documents indexed yet", "", {}, "", gr.update(choices=[])
+        return "No documents indexed yet", {}, pd.DataFrame(), "", gr.update(choices=[])
 
-    # Group documents
+    # Group documents by parent directory
     doc_groups = {}
     for doc_path in docs:
         try:
-            doc_name = Path(doc_path).name
             parent_name = Path(doc_path).parent.name
+            relative_path = str(Path(doc_path).relative_to(Path("data/processed_markdown")))
 
             if parent_name not in doc_groups:
                 doc_groups[parent_name] = []
-            doc_groups[parent_name].append(doc_name)
+            doc_groups[parent_name].append({
+                "filename": Path(doc_path).name,
+                "path": relative_path
+            })
         except:
             if "other" not in doc_groups:
                 doc_groups["other"] = []
-            doc_groups["other"].append(str(doc_path))
-
-    # Format document list with expandable groups
-    doc_text = f"**Total: {len(docs)} documents in {len(doc_groups)} groups**\n\n"
-    group_choices = ["All Groups"] + list(doc_groups.keys())
-
-    for group, files in doc_groups.items():
-        doc_text += f"📁 **{group}** ({len(files)} files)\n"
-        doc_text += f"   Use search or select group to view files\n\n"
+            doc_groups["other"].append({
+                "filename": str(doc_path),
+                "path": str(doc_path)
+            })
 
     # Format statistics
+    indexed_docs = status.get('indexed_documents', 0)
+    indexed_chunks = status.get('indexed_chunks', 0)
+    active_jobs = status.get('active_jobs', 0)
+
     stats_text = f"""
 **System Statistics:**
-- Documents: {status.get('indexed_documents', 0)}
-- Text Chunks: {status.get('indexed_chunks', 0)}
-- Active Jobs: {status.get('active_jobs', 0)}
+- Documents: {indexed_docs}
+- Text Chunks: {indexed_chunks}
+- Active Jobs: {active_jobs}
 - Status: {status.get('status', 'unknown')}
 """
 
+    # Create proper stats dataframe
+    avg_chunks = indexed_chunks / max(indexed_docs, 1) if indexed_docs > 0 else 0
     stats_df = pd.DataFrame([
-        {"Metric": "Documents", "Value": status.get('indexed_documents', 0)},
-        {"Metric": "Text Chunks", "Value": status.get('indexed_chunks', 0)},
-        {"Metric": "Avg Chunks/Doc",
-         "Value": f"{status.get('indexed_chunks', 0) / max(status.get('indexed_documents', 1), 1):.1f}"},
-        {"Metric": "Active Jobs", "Value": status.get('active_jobs', 0)},
+        {"Metric": "Documents", "Value": indexed_docs},
+        {"Metric": "Text Chunks", "Value": indexed_chunks},
+        {"Metric": "Avg Chunks/Doc", "Value": f"{avg_chunks:.1f}"},
+        {"Metric": "Active Jobs", "Value": active_jobs},
     ])
 
-    return doc_text, stats_text, stats_df, "", gr.update(choices=group_choices)
+    group_choices = ["All Groups"] + list(doc_groups.keys())
+
+    return f"Total: {len(docs)} documents in {len(doc_groups)} groups", doc_groups, stats_df, stats_text, gr.update(
+        choices=group_choices)
+
+
+def load_document_group(group_name, doc_groups):
+    """Load all files for a specific document group."""
+    if not group_name or group_name not in doc_groups:
+        return gr.update(choices=[], visible=False)
+
+    files = doc_groups[group_name]
+    choices = []
+
+    for file_info in files:
+        display_name = f"📄 {file_info['filename']}"
+        choices.append(display_name)
+
+    return gr.update(choices=choices, visible=True, value=None)
+
+
+def handle_library_file_selection(selected_file, group_name, doc_groups):
+    """Handle file selection from document library."""
+    if not selected_file or not group_name or group_name not in doc_groups:
+        return "No file selected"
+
+    # Find the file path
+    filename = selected_file.replace("📄 ", "")
+    for file_info in doc_groups[group_name]:
+        if file_info['filename'] == filename:
+            return load_document_content(file_info['path'])
+
+    return "File not found"
 
 
 def search_docs_fn(query: str, selected_group: str, page: int = 1):
-    """Search documents and return formatted results."""
+    """Search documents and return radio button choices."""
+    global search_file_paths
+    search_file_paths = {}  # Reset the mapping
+
     if not query.strip():
-        return "Enter a search query", gr.update(visible=False), gr.update(visible=False)
+        return "Enter a search query to find documents", gr.update(choices=[], visible=False), ""
 
     group_filter = None if selected_group == "All Groups" else selected_group
     results = client.search_documents(query, group_filter, page, 20)
 
     if "error" in results:
-        return f"Search error: {results['error']}", gr.update(visible=False), gr.update(visible=False)
+        return f"Search error: {results['error']}", gr.update(choices=[], visible=False), ""
 
     files = results.get("results", [])
     total = results.get("total", 0)
@@ -372,45 +409,84 @@ def search_docs_fn(query: str, selected_group: str, page: int = 1):
     total_pages = results.get("total_pages", 1)
 
     if not files:
-        return "No files found", gr.update(visible=False), gr.update(visible=False)
+        return "No files found matching your search", gr.update(choices=[], visible=False), ""
 
-    # Format results
-    results_text = f"**Found {total} files** (Page {current_page}/{total_pages})\n\n"
-    file_choices = []
+    # Create choices for radio buttons and store file paths
+    choices = []
 
     for file_info in files:
         match_type = file_info.get("match_type", "")
         match_indicator = {"filename": "📝", "content": "🔍", "all": "📄"}.get(match_type, "📄")
 
-        results_text += f"{match_indicator} **{file_info['filename']}**\n"
-        results_text += f"   Group: {file_info['group']} | Match: {match_type}\n\n"
+        display_name = f"{match_indicator} {file_info['filename']} | 📂 {file_info['group']}"
+        choices.append(display_name)
+        search_file_paths[display_name] = file_info['file_path']  # Store mapping
 
-        file_choices.append(file_info['file_path'])
+    summary_text = f"**Found {total} files** (Page {current_page}/{total_pages}) - Click to view:"
 
-    # Pagination controls
-    if total_pages > 1:
-        results_text += f"\n**Page {current_page} of {total_pages}**"
+    # Auto-load first result
+    first_content = load_document_content(files[0]['file_path'])
 
-    return results_text, gr.update(visible=True, choices=file_choices), gr.update(visible=True)
+    return summary_text, gr.update(choices=choices, visible=True, value=choices[0]), first_content
+
+
+def handle_file_selection(selected_choice):
+    """Handle radio button selection."""
+    global search_file_paths
+
+    if not selected_choice or selected_choice not in search_file_paths:
+        return "No file selected or file not found"
+
+    file_path = search_file_paths[selected_choice]
+    return load_document_content(file_path)
+
+
+# Global variable to store file paths (not ideal but works)
+search_file_paths = {}
 
 
 def load_document_content(file_path: str):
     """Load and display document content."""
     if not file_path:
-        return "Select a file to view its content"
+        return "No file selected"
 
     result = client.get_document_content(file_path)
 
     if "error" in result:
-        return f"Error loading file: {result['error']}"
+        return f"❌ **Error loading file**\n\n{result['error']}"
 
     content = result.get("content", "")
     filename = Path(file_path).name
 
-    # Format with header
-    formatted_content = f"# 📄 {filename}\n\n---\n\n{content}"
+    # Format with nice header and padding
+    formatted_content = f"""# 📄 {filename}
+
+**Path:** `{file_path}`
+
+---
+
+{content}"""
 
     return formatted_content
+
+
+def parse_file_selection(search_results_text: str, evt: gr.SelectData):
+    """Parse clicked file from search results."""
+    try:
+        lines = search_results_text.split('\n')
+        clicked_line_idx = evt.index[0] if hasattr(evt, 'index') else 0
+
+        # Find the file path in the clicked section
+        for i in range(clicked_line_idx, min(clicked_line_idx + 5, len(lines))):
+            line = lines[i]
+            if '📄 Path:' in line:
+                # Extract path from markdown code block
+                path = line.split('`')[1] if '`' in line else ""
+                return load_document_content(path)
+
+        return "Could not extract file path from selection"
+    except Exception as e:
+        return f"Error parsing selection: {str(e)}"
 
 def reindex_documents(force_reindex: bool):
     """Trigger document reindexing."""
@@ -595,82 +671,119 @@ def build_interface():
                     outputs=[progress_status, progress_display, gr.State()]
                 )
 
-                # ===== DOCUMENTS TAB =====
-                with gr.Tab("📚 Documents"):
-                    with gr.Row():
-                        # Left Panel - Document Library & Search
-                        with gr.Column(scale=1):
-                            refresh_docs_btn = gr.Button("🔄 Refresh Document Library")
+            # ===== DOCUMENTS TAB =====
+            with gr.Tab("📚 Documents"):
+                with gr.Row():
+                    # Left Panel - Search & Library
+                    with gr.Column(scale=1):
+                        refresh_docs_btn = gr.Button("🔄 Refresh Document Library")
 
-                            # Search Section
-                            with gr.Group():
-                                gr.Markdown("### 🔍 Search Documents")
-                                with gr.Row():
-                                    search_query = gr.Textbox(
-                                        label="Search Query",
-                                        placeholder="Search filenames and content...",
-                                        scale=2
-                                    )
-                                    group_filter = gr.Dropdown(
-                                        label="Filter by Group",
-                                        choices=["All Groups"],
-                                        value="All Groups",
-                                        scale=1
-                                    )
-                                search_btn = gr.Button("🔍 Search", variant="primary")
+                        # Search Results Accordion
+                        with gr.Accordion("🔍 Search Documents", open=True):
+                            with gr.Row():
+                                search_query = gr.Textbox(
+                                    label="Search Query",
+                                    placeholder="Search filenames and content...",
+                                    scale=2
+                                )
+                                group_filter = gr.Dropdown(
+                                    label="Filter by Group",
+                                    choices=["All Groups"],
+                                    value="All Groups",
+                                    scale=1
+                                )
+                            search_btn = gr.Button("🔍 Search", variant="primary")
 
-                            # Results Section
-                            search_results = gr.Markdown(label="Search Results")
-                            file_selector = gr.Dropdown(
-                                label="Select File to View",
+                            search_summary = gr.Markdown(
+                                value="Enter a search query to find documents"
+                            )
+                            file_selector = gr.Radio(
+                                label="Select File",
                                 choices=[],
                                 visible=False,
                                 interactive=True
                             )
 
-                            # Library Overview
-                            with gr.Group():
-                                gr.Markdown("### 📚 Document Library")
-                                docs_display = gr.Markdown(label="Documents Overview")
+                        # Document Library Accordion
+                        with gr.Accordion("📚 Document Library", open=False):
+                            library_summary = gr.Markdown(value="Loading...")
+                            doc_groups_state = gr.State({})
 
-                            # Statistics
-                            with gr.Group():
-                                gr.Markdown("### 📊 Statistics")
-                                stats_display = gr.Markdown(label="System Stats")
-                                stats_table = gr.Dataframe(label="Metrics")
+                            # Group selector
+                            group_selector = gr.Radio(
+                                label="Select Document Group",
+                                choices=[],
+                                interactive=True
+                            )
 
-                        # Right Panel - Document Viewer
-                        with gr.Column(scale=1):
+                            # File selector for selected group
+                            library_file_selector = gr.Radio(
+                                label="Select File",
+                                choices=[],
+                                visible=False,
+                                interactive=True
+                            )
+
+                        # Statistics Accordion
+                        with gr.Accordion("📊 Statistics", open=False):
+                            stats_display = gr.Markdown(label="System Stats")
+                            stats_table = gr.Dataframe(
+                                label="Metrics",
+                                headers=["Metric", "Value"],
+                                datatype=["str", "str"]
+                            )
+
+                    # Right Panel - Document Viewer
+                    with gr.Column(scale=1):
+                        with gr.Group():
                             gr.Markdown("### 📖 Document Viewer")
                             document_content = gr.Markdown(
-                                value="Select a file from search results to view its content",
+                                value="🔍 Search for documents or browse the library to view content",
                                 label="Content",
                                 elem_classes=["document-viewer"]
                             )
 
-                    # Wire up functionality
-                    refresh_docs_btn.click(
-                        fn=refresh_documents,
-                        outputs=[docs_display, stats_display, stats_table, search_query, group_filter]
-                    )
+                # Wire up functionality
+                refresh_docs_btn.click(
+                    fn=refresh_documents,
+                    outputs=[library_summary, doc_groups_state, stats_table, stats_display, group_filter]
+                )
 
-                    search_btn.click(
-                        fn=search_docs_fn,
-                        inputs=[search_query, group_filter],
-                        outputs=[search_results, file_selector, file_selector]  # Last one controls visibility
-                    )
+                search_btn.click(
+                    fn=search_docs_fn,
+                    inputs=[search_query, group_filter],
+                    outputs=[search_summary, file_selector, document_content]
+                )
 
-                    file_selector.change(
-                        fn=load_document_content,
-                        inputs=[file_selector],
-                        outputs=[document_content]
-                    )
+                file_selector.change(
+                    fn=handle_file_selection,
+                    inputs=[file_selector],
+                    outputs=[document_content]
+                )
 
-                    # Load on tab initialization
-                    app.load(
-                        fn=refresh_documents,
-                        outputs=[docs_display, stats_display, stats_table, search_query, group_filter]
-                    )
+                # Library group selection
+                group_selector.change(
+                    fn=load_document_group,
+                    inputs=[group_selector, doc_groups_state],
+                    outputs=[library_file_selector]
+                )
+
+                # Library file selection
+                library_file_selector.change(
+                    fn=handle_library_file_selection,
+                    inputs=[library_file_selector, group_selector, doc_groups_state],
+                    outputs=[document_content]
+                )
+
+                # Auto-load on startup
+                app.load(
+                    fn=refresh_documents,
+                    outputs=[library_summary, doc_groups_state, stats_table, stats_display, group_filter]
+                ).then(
+                    fn=lambda doc_groups: gr.update(choices=list(doc_groups.keys()) if doc_groups else []),
+                    inputs=[doc_groups_state],
+                    outputs=[group_selector]
+                )
 
             # ===== SESSION NOTES TAB =====
             with gr.Tab("📝 Session Notes"):
@@ -697,6 +810,36 @@ def build_interface():
             elem_classes=["footer"]
         )
 
+        # Custom CSS for better spacing and styling
+        gr.HTML("""
+        <style>
+        .prose {
+            padding-left: 1rem !important;
+        }
+        .label {
+            padding-left: 1rem !important;
+        }
+        .group { 
+            padding: 1rem !important; 
+            margin: 0.5rem 0 !important; 
+            border-radius: 8px !important;
+        }
+        .document-viewer { 
+            padding: 1rem !important; 
+            max-height: 600px !important;
+            overflow-y: auto !important;
+        }
+        .gradio-markdown { 
+            padding: 0.75rem !important; 
+        }
+        .gradio-dataframe { 
+            margin: 0.5rem 0 !important; 
+        }
+        .gradio-textbox, .gradio-dropdown { 
+            margin-bottom: 0.5rem !important; 
+        }
+        </style>
+        """)
     return app
 
 # ===== MAIN EXECUTION =====
