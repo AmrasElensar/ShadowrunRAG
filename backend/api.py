@@ -16,6 +16,10 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from .indexer import IncrementalIndexer
 from .retriever import Retriever
+from .models import (
+    HealthCheckResponse, UploadResponse, JobStatusResponse, JobsListResponse,
+    QueryResponse, IndexResponse, DocumentsResponse, ModelsResponse, SystemStatusResponse
+)
 from tools.pdf_processor import PDFProcessor
 
 logging.basicConfig(level=logging.INFO)
@@ -112,15 +116,15 @@ class IndexRequest(BaseModel):
     directory: str = "data/processed_markdown"
     force_reindex: bool = False
 
-@app.get("/")
+@app.get("/", response_model=HealthCheckResponse)
 def root():
     """Health check."""
-    return {
-        "status": "online",
-        "service": "Shadowrun RAG API",
-        "active_jobs": len(progress_tracker.active_jobs),
-        "tracking_method": "polling"
-    }
+    return HealthCheckResponse(
+        status="online",
+        service="Shadowrun RAG API",
+        active_jobs=len(progress_tracker.active_jobs),
+        tracking_method="polling"
+    )
 
 def process_pdf_with_progress(pdf_path: str, job_id: str):
     """Process PDF with progress tracking (synchronous version)."""
@@ -153,7 +157,7 @@ def process_pdf_with_progress(pdf_path: str, job_id: str):
         logger.error(traceback.format_exc())
         raise
 
-@app.post("/upload")
+@app.post("/upload", response_model=UploadResponse)
 async def upload_pdf_with_progress(file: UploadFile = File(...)):
     """Upload and process a PDF with progress tracking."""
     if not file.filename.endswith('.pdf'):
@@ -180,41 +184,42 @@ async def upload_pdf_with_progress(file: UploadFile = File(...)):
         thread = threading.Thread(target=start_processing, daemon=True)
         thread.start()
 
-        return {
-            "job_id": job_id,
-            "filename": file.filename,
-            "status": "processing",
-            "message": "PDF uploaded. Processing started with progress tracking.",
-            "poll_url": f"/job/{job_id}"
-        }
+        return UploadResponse(
+            job_id=job_id,
+            filename=file.filename,
+            status="processing",
+            message="PDF uploaded. Processing started with progress tracking.",
+            poll_url=f"/job/{job_id}"
+        )
 
     except Exception as e:
         logger.error(f"Upload failed: {e}")
         raise HTTPException(500, f"Upload failed: {str(e)}")
 
-@app.get("/job/{job_id}")
+@app.get("/job/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
     """Get current status of a processing job."""
     status = progress_tracker.get_job_status(job_id)
     if status:
-        return status
+        return JobStatusResponse(**status)
     else:
-        return {
-            "job_id": job_id,
-            "status": "not_found",
-            "message": "Job not found or completed",
-            "timestamp": time.time()
-        }
+        return JobStatusResponse(
+            job_id=job_id,
+            status="not_found",
+            message="Job not found or completed",
+            timestamp=time.time()
+        )
 
-@app.get("/jobs")
+@app.get("/jobs", response_model=JobsListResponse)
 async def list_all_jobs():
     """List all active jobs (for debugging)."""
-    return {
-        "active_jobs": progress_tracker.get_all_jobs(),
-        "count": len(progress_tracker.active_jobs)
-    }
+    active_jobs = progress_tracker.get_all_jobs()
+    return JobsListResponse(
+        active_jobs=active_jobs,
+        count=len(active_jobs)
+    )
 
-@app.post("/query")
+@app.post("/query", response_model=QueryResponse)
 async def query(request: QueryRequest):
     """Query the RAG system with full context."""
     try:
@@ -249,7 +254,7 @@ async def query(request: QueryRequest):
             character_stats=request.character_stats,
             edition=request.edition
         )
-        return results
+        return QueryResponse(**results)
 
     except Exception as e:
         logger.error(f"Query error: {e}", exc_info=True)
@@ -328,7 +333,7 @@ async def query_stream(request: QueryRequest):
         logger.error(f"Stream error: {e}")
         raise HTTPException(500, str(e))
 
-@app.post("/index")
+@app.post("/index", response_model=IndexResponse)
 async def index_documents(request: IndexRequest):
     """Manually trigger indexing."""
     try:
@@ -336,12 +341,15 @@ async def index_documents(request: IndexRequest):
             request.directory,
             request.force_reindex
         )
-        return {"status": "success", "message": "Indexing complete"}
+        return IndexResponse(
+            status="success",
+            message="Indexing complete"
+        )
     except Exception as e:
         logger.error(f"Indexing error: {e}")
         raise HTTPException(500, str(e))
 
-@app.get("/documents")
+@app.get("/documents", response_model=DocumentsResponse)
 async def list_documents():
     """List all indexed documents."""
     try:
@@ -352,12 +360,12 @@ async def list_documents():
             if metadata and 'source' in metadata:
                 sources.add(metadata['source'])
 
-        return {"documents": sorted(list(sources))}
+        return DocumentsResponse(documents=sorted(list(sources)))
     except Exception as e:
         logger.error(f"Error listing documents: {e}")
-        return {"documents": []}
+        return DocumentsResponse(documents=[])
 
-@app.get("/models")
+@app.get("/models", response_model=ModelsResponse)
 async def list_models():
     """List available Ollama models."""
     try:
@@ -375,13 +383,13 @@ async def list_models():
             if model_name:
                 models.append(model_name)
 
-        return {"models": models}
+        return ModelsResponse(models=models)
 
     except Exception as e:
         logger.error(f"Error listing models: {e}")
-        return {"models": [], "error": str(e)}
+        return ModelsResponse(models=[], error=str(e))
 
-@app.get("/status")
+@app.get("/status", response_model=SystemStatusResponse)
 async def status():
     """Return system status and indexed document count."""
     try:
@@ -409,17 +417,17 @@ async def status():
             logger.warning(f"Failed to get models: {model_error}")
             models_available = []
 
-        return {
-            "status": "online",
-            "indexed_documents": len(sources),
-            "indexed_chunks": doc_count,
-            "active_jobs": len(progress_tracker.active_jobs),
-            "tracking_method": "polling",
-            "models_available": models_available
-        }
+        return SystemStatusResponse(
+            status="online",
+            indexed_documents=len(sources),
+            indexed_chunks=doc_count,
+            active_jobs=len(progress_tracker.active_jobs),
+            tracking_method="polling",
+            models_available=models_available
+        )
     except Exception as e:
         logger.error(f"Status check failed: {e}")
-        return {"status": "degraded", "error": str(e)}
+        return SystemStatusResponse(status="degraded", error=str(e))
 
 if __name__ == "__main__":
     import uvicorn
