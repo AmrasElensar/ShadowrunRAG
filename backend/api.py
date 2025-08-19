@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .indexer import IncrementalIndexer
 from .retriever import Retriever
 from .models import (
-    HealthCheckResponse, UploadResponse, JobStatusResponse, JobsListResponse,
+    HealthCheckResponse, UploadResponse, JobStatusResponse, JobsListResponse, JobInfo,
     QueryResponse, IndexResponse, DocumentsResponse, ModelsResponse, SystemStatusResponse
 )
 from tools.pdf_processor import PDFProcessor
@@ -213,10 +213,22 @@ async def get_job_status(job_id: str):
 @app.get("/jobs", response_model=JobsListResponse)
 async def list_all_jobs():
     """List all active jobs (for debugging)."""
-    active_jobs = progress_tracker.get_all_jobs()
+    active_jobs_raw = progress_tracker.get_all_jobs()
+
+    # Convert to the proper structure
+    active_jobs_formatted = {}
+    for job_id, job_data in active_jobs_raw.items():
+        active_jobs_formatted[job_id] = JobInfo(
+            job_id=job_data.get("job_id", job_id),
+            stage=job_data.get("stage"),
+            progress=job_data.get("progress"),
+            details=job_data.get("details"),
+            timestamp=job_data.get("timestamp")
+        )
+
     return JobsListResponse(
-        active_jobs=active_jobs,
-        count=len(active_jobs)
+        active_jobs=active_jobs_formatted,
+        count=len(active_jobs_formatted)
     )
 
 @app.post("/query", response_model=QueryResponse)
@@ -260,7 +272,7 @@ async def query(request: QueryRequest):
         logger.error(f"Query error: {e}", exc_info=True)
         raise HTTPException(500, str(e))
 
-@app.post("/query_stream")
+@app.post("/query_stream", responses={200: {"content": {"text/plain": {"schema": {"type": "string"}}}}})
 async def query_stream(request: QueryRequest):
     """Stream the answer and include full metadata at the end."""
     try:

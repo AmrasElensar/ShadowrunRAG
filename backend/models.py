@@ -33,9 +33,17 @@ class JobStatusResponse(BaseModel):
     message: Optional[str] = Field(None, description="Status message (for not found jobs)")
 
 
+class JobInfo(BaseModel):
+    """Information about a single job."""
+    job_id: str = Field(..., description="Job identifier")
+    stage: Optional[str] = Field(None, description="Current processing stage")
+    progress: Optional[float] = Field(None, description="Progress percentage")
+    details: Optional[str] = Field(None, description="Status details")
+    timestamp: Optional[float] = Field(None, description="Last update timestamp")
+
 class JobsListResponse(BaseModel):
     """Response for listing all active jobs."""
-    active_jobs: Dict[str, Dict[str, Any]] = Field(..., description="Dictionary of active jobs")
+    active_jobs: Dict[str, JobInfo] = Field(..., description="Dictionary of active jobs")
     count: int = Field(..., description="Number of active jobs")
 
 
