@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY frontend/gradio_app.py ./
 
+# Set environment variable default (will be overridden by docker-compose)
+ENV API_URL=http://backend:8000
+
 # Expose Gradio port
 EXPOSE 7860
 

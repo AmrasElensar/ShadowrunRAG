@@ -379,7 +379,7 @@ async def list_models():
 
     except Exception as e:
         logger.error(f"Error listing models: {e}")
-        return {"models": ["llama3", "mistral", "codellama"], "error": str(e)}
+        return {"models": [], "error": str(e)}
 
 @app.get("/status")
 async def status():
@@ -407,7 +407,7 @@ async def status():
                     models_available.append(model_name)
         except Exception as model_error:
             logger.warning(f"Failed to get models: {model_error}")
-            models_available = ["llama3"]
+            models_available = []
 
         return {
             "status": "online",

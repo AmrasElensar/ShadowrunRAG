@@ -18,8 +18,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # API Configuration
-API_URL = "http://localhost:8000"
-
+import os
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 class RAGClient:
     """Client for interacting with the FastAPI backend."""
@@ -144,10 +144,8 @@ class RAGClient:
             logger.error(f"Reindex failed: {e}")
             return {"error": str(e)}
 
-
 # Initialize client
 client = RAGClient()
-
 
 # ===== UPLOAD TAB FUNCTIONS =====
 
@@ -175,20 +173,19 @@ def process_uploads(files) -> str:
 
     return "\n".join(results)
 
-
 def poll_progress():
     """Poll all active jobs and return progress info."""
     try:
-        response = requests.get(f"{API_URL}/jobs", timeout=5)
+        response = requests.get(f"{client.api_url}/jobs", timeout=5)
         response.raise_for_status()
         jobs = response.json().get("active_jobs", {})
 
         if not jobs:
-            return "No active processing jobs", gr.update(visible=False)
+            return "No active processing jobs", gr.update(visible=False), 0
 
         # Format progress information
         progress_lines = []
-        progress_data = []
+        progress_values = []
 
         for job_id, job_info in jobs.items():
             stage = job_info.get("stage", "unknown")
@@ -204,39 +201,30 @@ def poll_progress():
                 f"   {details}"
             )
 
-            # For progress bars
-            progress_data.append({
-                "file": filename,
-                "progress": progress / 100.0,
-                "stage": stage
-            })
+            progress_values.append(progress)
 
         progress_text = "\n\n".join(progress_lines)
 
-        # Create progress bars
-        if progress_data:
-            # Show first job's progress as main indicator
-            main_progress = progress_data[0]["progress"]
-            return progress_text, gr.update(value=main_progress, visible=True)
+        # Calculate average progress
+        avg_progress = sum(progress_values) / len(progress_values) if progress_values else 0
 
-        return progress_text, gr.update(visible=False)
+        return progress_text, gr.update(visible=True, value=avg_progress), avg_progress
 
     except Exception as e:
-        return f"Error checking progress: {str(e)}", gr.update(visible=False)
-
+        return f"Error checking progress: {str(e)}", gr.update(visible=False), 0
 
 # ===== QUERY TAB FUNCTIONS =====
 
 def submit_query(
-        question: str,
-        model: str,
-        n_results: int,
-        query_type: str,
-        character_role: str,
-        character_stats: str,
-        edition: str,
-        filter_section: str,
-        filter_subsection: str
+    question: str,
+    model: str,
+    n_results: int,
+    query_type: str,
+    character_role: str,
+    character_stats: str,
+    edition: str,
+    filter_section: str,
+    filter_subsection: str
 ):
     """Submit query and stream response."""
     if not question:
@@ -277,8 +265,8 @@ def submit_query(
             chunks_data = []
             if metadata.get("chunks"):
                 for i, (chunk, dist) in enumerate(zip(
-                        metadata.get("chunks", []),
-                        metadata.get("distances", [])
+                    metadata.get("chunks", []),
+                    metadata.get("distances", [])
                 )):
                     chunks_data.append({
                         "Relevance": f"{(1 - dist):.2%}" if dist else "N/A",
@@ -289,7 +277,6 @@ def submit_query(
         else:
             # Still generating
             yield response + "▌", "", []
-
 
 # ===== DOCUMENT TAB FUNCTIONS =====
 
@@ -339,13 +326,11 @@ def refresh_documents():
     stats_df = pd.DataFrame([
         {"Metric": "Documents", "Value": status.get('indexed_documents', 0)},
         {"Metric": "Text Chunks", "Value": status.get('indexed_chunks', 0)},
-        {"Metric": "Avg Chunks/Doc",
-         "Value": f"{status.get('indexed_chunks', 0) / max(status.get('indexed_documents', 1), 1):.1f}"},
+        {"Metric": "Avg Chunks/Doc", "Value": f"{status.get('indexed_chunks', 0) / max(status.get('indexed_documents', 1), 1):.1f}"},
         {"Metric": "Active Jobs", "Value": status.get('active_jobs', 0)},
     ])
 
     return doc_text, stats_text, stats_df
-
 
 def reindex_documents(force_reindex: bool):
     """Trigger document reindexing."""
@@ -353,7 +338,6 @@ def reindex_documents(force_reindex: bool):
     if "error" in result:
         return f"❌ Reindexing failed: {result['error']}"
     return "✅ Reindexing complete!"
-
 
 # ===== BUILD GRADIO INTERFACE =====
 
@@ -392,9 +376,10 @@ def build_interface():
                         gr.Markdown("### ⚙️ Configuration")
 
                         model_select = gr.Dropdown(
-                            choices=client.get_models(),
+                            choices=client.get_models() or ["llama3:8b-instruct-q4_K_M"],
                             value="llama3:8b-instruct-q4_K_M",
-                            label="LLM Model"
+                            label="LLM Model",
+                            allow_custom_value=True
                         )
 
                         n_results_slider = gr.Slider(
@@ -411,7 +396,7 @@ def build_interface():
                         with gr.Accordion("👤 Character Context", open=False):
                             character_role_select = gr.Dropdown(
                                 choices=["None", "Decker", "Mage", "Street Samurai",
-                                         "Rigger", "Adept", "Technomancer", "Face"],
+                                        "Rigger", "Adept", "Technomancer", "Face"],
                                 value="None",
                                 label="Character Role"
                             )
@@ -430,7 +415,7 @@ def build_interface():
                         with gr.Accordion("🔍 Filters", open=False):
                             section_filter = gr.Dropdown(
                                 choices=["All", "Combat", "Matrix", "Magic", "Gear",
-                                         "Character Creation", "Riggers", "Technomancy"],
+                                        "Character Creation", "Riggers", "Technomancy"],
                                 value="All",
                                 label="Filter by Section"
                             )
@@ -469,7 +454,13 @@ def build_interface():
                             interactive=False
                         )
 
-                        progress_bar = gr.Progress(visible=False)
+                        # Progress indicator (not a component, just for display)
+                        progress_display = gr.Number(
+                            label="Overall Progress (%)",
+                            value=0,
+                            interactive=False,
+                            visible=False
+                        )
 
                         with gr.Row():
                             check_progress_btn = gr.Button("🔄 Check Progress")
@@ -494,7 +485,7 @@ def build_interface():
 
                 check_progress_btn.click(
                     fn=poll_progress,
-                    outputs=[progress_status, progress_bar]
+                    outputs=[progress_status, progress_display, gr.State()]
                 )
 
                 reindex_btn.click(
@@ -511,7 +502,7 @@ def build_interface():
                 def auto_refresh_progress(enable):
                     if enable:
                         return poll_progress()
-                    return "", gr.update(visible=False)
+                    return "", gr.update(visible=False), 0
 
                 timer = gr.Timer(5.0, active=False)
                 auto_refresh.change(
@@ -521,7 +512,7 @@ def build_interface():
                 )
                 timer.tick(
                     fn=poll_progress,
-                    outputs=[progress_status, progress_bar]
+                    outputs=[progress_status, progress_display, gr.State()]
                 )
 
             # ===== DOCUMENTS TAB =====
@@ -552,13 +543,13 @@ def build_interface():
             with gr.Tab("📝 Session Notes"):
                 gr.Markdown("""
                 ### 🔧 Session Notes - Coming Soon!
-
+                
                 This feature will allow you to:
                 - Upload and manage session notes
                 - Query past events and NPCs
                 - Track ongoing plot threads
                 - Search across your entire campaign
-
+                
                 For now, upload session notes as PDFs in the Upload tab.
                 """)
 
@@ -574,7 +565,6 @@ def build_interface():
         )
 
     return app
-
 
 # ===== MAIN EXECUTION =====
 

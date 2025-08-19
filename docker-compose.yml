@@ -73,21 +73,32 @@ services:
       retries: 15
       start_period: 60s
 
+# Replace the frontend service in your docker-compose.yml with:
+
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
     container_name: shadowrun-frontend
     ports:
-      - "7860:7860"  # Gradio default port
+      - "7860:7860"  # Gradio port
+    volumes:
+      - ./frontend:/app/frontend
+      - ./data:/app/data:rw
     environment:
-      - API_URL=http://backend:8000
+      - API_URL=http://backend:8000  # Use backend hostname in Docker network
     depends_on:
       backend:
         condition: service_healthy
     networks:
       - shadowrun-net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # Optional: Nginx for nice URLs
   nginx:
