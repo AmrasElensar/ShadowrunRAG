@@ -31,7 +31,7 @@ unstructured[pdf]==0.18.11
 # ===================
 ollama==0.5.3              # Latest stable version
 chromadb==1.0.16           # Latest stable with Pydantic 2 support
-pydantic==2.9.2           # Pydantic 2 for modern FastAPI compatibility
+pydantic==2.10.6          # Pydantic 2 for modern FastAPI compatibility
 pydantic-settings==2.6.1  # Required for ChromaDB BaseSettings
 
 # LangChain with latest compatible versions

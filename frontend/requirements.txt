@@ -1,4 +1,5 @@
 # Gradio Frontend Requirements
-gradio==4.44.0
+gradio==4.44.1
+pydantic==2.10.6
 requests==2.32.4
 pandas==2.2.3
