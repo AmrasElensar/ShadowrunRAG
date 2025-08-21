@@ -1,14 +1,12 @@
-"""FastAPI backend server with simplified polling-only progress tracking."""
+"""FastAPI backend server with enhanced document type support and improved filtering."""
 import ollama
-from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict
-import shutil
+from typing import Optional, Dict
 from pathlib import Path
 import logging
-import asyncio
 import json
 import time
 import traceback
@@ -27,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Shadowrun RAG API")
 
-# CORS for Streamlit
+# CORS for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,22 +34,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# SIMPLIFIED progress tracking (polling-only)
+# Enhanced progress tracking
 class PollingProgressTracker:
-    """Simple progress tracker for polling-based updates."""
+    """Enhanced progress tracker for polling-based updates with document type awareness."""
 
     def __init__(self):
         self.active_jobs: Dict[str, Dict] = {}
         self.lock = threading.Lock()
-        logger.info("🔧 PollingProgressTracker initialized")
+        logger.info("🔧 Enhanced PollingProgressTracker initialized")
 
-    def update_progress(self, job_id: str, stage: str, progress: float, details: str = ""):
-        """Update progress (thread-safe)."""
+    def update_progress(self, job_id: str, stage: str, progress: float, details: str = "", document_type: str = "unknown"):
+        """Update progress with document type information (thread-safe)."""
         progress_data = {
             "job_id": job_id,
             "stage": stage,
-            "progress": max(0, min(100, progress)),  # Clamp 0-100
+            "progress": max(0, min(100, progress)),
             "details": details,
+            "document_type": document_type,
             "timestamp": time.time()
         }
 
@@ -59,14 +58,14 @@ class PollingProgressTracker:
             self.active_jobs[job_id] = progress_data
 
         # Log for debugging
-        logger.info(f"Progress [{job_id}]: {stage} ({progress}%) - {details}")
+        logger.info(f"Progress [{job_id}] ({document_type}): {stage} ({progress}%) - {details}")
 
     def get_job_status(self, job_id: str) -> Optional[Dict]:
         """Get current job status."""
         with self.lock:
             return self.active_jobs.get(job_id)
 
-    def cleanup_job(self, job_id: str, delay: int = 300):  # 5 minutes cleanup
+    def cleanup_job(self, job_id: str, delay: int = 300):
         """Remove completed job after delay."""
         def cleanup():
             time.sleep(delay)
@@ -75,12 +74,11 @@ class PollingProgressTracker:
                     del self.active_jobs[job_id]
                     logger.info(f"🧹 Cleaned up job: {job_id}")
 
-        # Run cleanup in background thread
         cleanup_thread = threading.Thread(target=cleanup, daemon=True)
         cleanup_thread.start()
 
     def get_all_jobs(self) -> Dict[str, Dict]:
-        """Get all active jobs (for debugging)."""
+        """Get all active jobs."""
         with self.lock:
             return self.active_jobs.copy()
 
@@ -95,10 +93,10 @@ indexer = IncrementalIndexer()
 retriever = Retriever()
 
 # Log initialization
-logger.info("🚀 FastAPI app initialized with components:")
-logger.info(f"   - PollingProgressTracker: ✅")
-logger.info(f"   - IncrementalIndexer: ✅")
-logger.info(f"   - Retriever: ✅")
+logger.info("🚀 Enhanced FastAPI app initialized with components:")
+logger.info(f"   - Enhanced PollingProgressTracker: ✅")
+logger.info(f"   - Enhanced IncrementalIndexer: ✅")
+logger.info(f"   - Enhanced Retriever: ✅")
 
 class QueryRequest(BaseModel):
     question: str
@@ -107,9 +105,11 @@ class QueryRequest(BaseModel):
     filter_source: Optional[str] = None
     filter_section: Optional[str] = None
     filter_subsection: Optional[str] = None
+    filter_document_type: Optional[str] = None  # New filter
+    filter_edition: Optional[str] = None        # New filter
     character_role: Optional[str] = None
     character_stats: Optional[str] = None
-    edition: Optional[str] = None
+    edition: Optional[str] = "SR5"              # Default to SR5
     model: Optional[str] = None
 
 class IndexRequest(BaseModel):
@@ -121,30 +121,45 @@ def root():
     """Health check."""
     return HealthCheckResponse(
         status="online",
-        service="Shadowrun RAG API",
+        service="Enhanced Shadowrun RAG API",
         active_jobs=len(progress_tracker.active_jobs),
-        tracking_method="polling"
+        tracking_method="polling_enhanced"
     )
 
-def process_pdf_with_progress(pdf_path: str, job_id: str):
-    """Process PDF with progress tracking (synchronous version)."""
+def process_pdf_with_progress(pdf_path: str, job_id: str, document_type: str = "rulebook"):
+    """Process PDF with enhanced progress tracking and document type awareness."""
     try:
-        # Create processor with progress callback
+        # Create processor with progress callback and document type
         def progress_callback(stage, progress, details):
-            progress_tracker.update_progress(job_id, stage, progress, details)
+            progress_tracker.update_progress(job_id, stage, progress, details, document_type)
 
-        progress_tracker.update_progress(job_id, "starting", 5, "Initializing PDF processing...")
+        progress_tracker.update_progress(
+            job_id, "starting", 5,
+            f"Initializing {document_type} processing...",
+            document_type
+        )
 
-        processor = PDFProcessor(progress_callback=progress_callback)
+        processor = PDFProcessor(
+            progress_callback=progress_callback,
+            document_type=document_type
+        )
 
         # Process the PDF
         result = processor.process_pdf(pdf_path, force_reparse=True)
 
         # Index the results
-        progress_tracker.update_progress(job_id, "indexing", 95, "Adding to search index...")
+        progress_tracker.update_progress(
+            job_id, "indexing", 95,
+            "Adding to search index with enhanced metadata...",
+            document_type
+        )
         indexer.index_directory("data/processed_markdown")
 
-        progress_tracker.update_progress(job_id, "complete", 100, f"Processing complete! Created {len(result)} files.")
+        progress_tracker.update_progress(
+            job_id, "complete", 100,
+            f"Processing complete! Created {len(result)} files as {document_type}.",
+            document_type
+        )
 
         # Schedule cleanup
         progress_tracker.cleanup_job(job_id)
@@ -152,19 +167,31 @@ def process_pdf_with_progress(pdf_path: str, job_id: str):
         return result
 
     except Exception as e:
-        progress_tracker.update_progress(job_id, "error", -1, f"Processing failed: {str(e)}")
+        progress_tracker.update_progress(
+            job_id, "error", -1,
+            f"Processing failed: {str(e)}",
+            document_type
+        )
         logger.error(f"Processing failed: {e}")
         logger.error(traceback.format_exc())
         raise
 
 @app.post("/upload", response_model=UploadResponse)
-async def upload_pdf_with_progress(file: UploadFile = File(...)):
-    """Upload and process a PDF with progress tracking."""
+async def upload_pdf_with_progress(
+    file: UploadFile = File(...),
+    document_type: str = Form(default="rulebook", description="Document type: rulebook, character_sheet, universe_info, adventure")
+):
+    """Upload and process a PDF with document type specification."""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(400, "Only PDF files are allowed")
 
+    # Validate document type
+    valid_types = ["rulebook", "character_sheet", "universe_info", "adventure"]
+    if document_type not in valid_types:
+        raise HTTPException(400, f"Invalid document type. Must be one of: {valid_types}")
+
     # Generate unique job ID
-    job_id = f"{file.filename}_{int(time.time() * 1000)}"
+    job_id = f"{document_type}_{file.filename}_{int(time.time() * 1000)}"
 
     try:
         # Save file quickly
@@ -177,7 +204,7 @@ async def upload_pdf_with_progress(file: UploadFile = File(...)):
         # Start processing in background thread
         def start_processing():
             try:
-                process_pdf_with_progress(str(save_path), job_id)
+                process_pdf_with_progress(str(save_path), job_id, document_type)
             except Exception as e:
                 logger.error(f"Background processing failed: {e}")
 
@@ -188,7 +215,7 @@ async def upload_pdf_with_progress(file: UploadFile = File(...)):
             job_id=job_id,
             filename=file.filename,
             status="processing",
-            message="PDF uploaded. Processing started with progress tracking.",
+            message=f"PDF uploaded as {document_type}. Processing started with enhanced tracking.",
             poll_url=f"/job/{job_id}"
         )
 
@@ -198,7 +225,7 @@ async def upload_pdf_with_progress(file: UploadFile = File(...)):
 
 @app.get("/job/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
-    """Get current status of a processing job."""
+    """Get current status of a processing job with enhanced information."""
     status = progress_tracker.get_job_status(job_id)
     if status:
         return JobStatusResponse(**status)
@@ -212,10 +239,9 @@ async def get_job_status(job_id: str):
 
 @app.get("/jobs", response_model=JobsListResponse)
 async def list_all_jobs():
-    """List all active jobs (for debugging)."""
+    """List all active jobs with document type information."""
     active_jobs_raw = progress_tracker.get_all_jobs()
 
-    # Convert to the proper structure
     active_jobs_formatted = {}
     for job_id, job_data in active_jobs_raw.items():
         active_jobs_formatted[job_id] = JobInfo(
@@ -233,27 +259,52 @@ async def list_all_jobs():
 
 @app.post("/query", response_model=QueryResponse)
 async def query(request: QueryRequest):
-    """Query the RAG system with full context."""
+    """Enhanced query with improved filtering logic."""
     try:
-        # Build metadata filter
+        # Build enhanced metadata filter
         where_filter = {}
 
+        # Document type filter
+        if request.filter_document_type and request.filter_document_type.strip():
+            where_filter["document_type"] = request.filter_document_type
+
+        # Edition filter (prioritize request edition over global preference)
+        edition_to_use = request.filter_edition or request.edition
+        if edition_to_use and edition_to_use != "None":
+            where_filter["edition"] = edition_to_use
+
+        # Source filter
         if request.filter_source and request.filter_source.strip():
             where_filter["source"] = {"$contains": request.filter_source}
-        if request.filter_section and request.filter_section.strip():
-            where_filter["Section"] = request.filter_section
-        if request.filter_subsection and request.filter_subsection.strip():
-            where_filter["Subsection"] = request.filter_subsection
 
-        # Role-based fallback
-        role_to_section = {
-            "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
-            "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Technomancy"
-        }
-        if (request.character_role and
-                request.character_role in role_to_section and
-                "Section" not in where_filter):
-            where_filter["Section"] = role_to_section[request.character_role]
+        # Section filtering with character role precedence
+        if request.character_role and request.character_role != "None":
+            # Character role takes precedence over manual section filter
+            role_to_section = {
+                "decker": "Matrix",
+                "hacker": "Matrix",
+                "mage": "Magic",
+                "adept": "Magic",
+                "street_samurai": "Combat",
+                "rigger": "Riggers",
+                "technomancer": "Matrix",
+                "face": "Social"  # Added Face role
+            }
+
+            role_section = role_to_section.get(request.character_role.lower())
+            if role_section:
+                where_filter["main_section"] = role_section
+                logger.info(f"Character role '{request.character_role}' mapped to section '{role_section}'")
+        elif request.filter_section and request.filter_section.strip() and request.filter_section != "All":
+            # Manual section filter only if no character role
+            where_filter["main_section"] = request.filter_section
+
+        # Subsection filter
+        if request.filter_subsection and request.filter_subsection.strip():
+            where_filter["subsection"] = request.filter_subsection
+
+        # Log filter for debugging
+        logger.info(f"Applied filters: {where_filter}")
 
         final_filter = where_filter if where_filter else None
 
@@ -264,7 +315,7 @@ async def query(request: QueryRequest):
             where_filter=final_filter,
             character_role=request.character_role,
             character_stats=request.character_stats,
-            edition=request.edition
+            edition=edition_to_use
         )
         return QueryResponse(**results)
 
@@ -274,27 +325,37 @@ async def query(request: QueryRequest):
 
 @app.post("/query_stream", responses={200: {"content": {"text/plain": {"schema": {"type": "string"}}}}})
 async def query_stream(request: QueryRequest):
-    """Stream the answer and include full metadata at the end."""
+    """Enhanced streaming with <think> tag detection and improved filtering."""
     try:
-        # Build filter
+        # Build enhanced filter (same logic as query endpoint)
         where_filter = {}
+
+        if request.filter_document_type and request.filter_document_type.strip():
+            where_filter["document_type"] = request.filter_document_type
+
+        edition_to_use = request.filter_edition or request.edition
+        if edition_to_use and edition_to_use != "None":
+            where_filter["edition"] = edition_to_use
 
         if request.filter_source and request.filter_source.strip():
             where_filter["source"] = {"$contains": request.filter_source}
-        if request.filter_section and request.filter_section.strip():
-            where_filter["Section"] = request.filter_section
+
+        # Character role precedence logic
+        if request.character_role and request.character_role != "None":
+            role_to_section = {
+                "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
+                "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Matrix", "face": "Social"
+            }
+            role_section = role_to_section.get(request.character_role.lower())
+            if role_section:
+                where_filter["main_section"] = role_section
+        elif request.filter_section and request.filter_section.strip() and request.filter_section != "All":
+            where_filter["main_section"] = request.filter_section
+
         if request.filter_subsection and request.filter_subsection.strip():
-            where_filter["Subsection"] = request.filter_subsection
+            where_filter["subsection"] = request.filter_subsection
 
-        role_to_section = {
-            "decker": "Matrix", "hacker": "Matrix", "mage": "Magic", "adept": "Magic",
-            "street_samurai": "Combat", "rigger": "Riggers", "technomancer": "Technomancy"
-        }
-        if (request.character_role and
-                request.character_role in role_to_section and
-                "Section" not in where_filter):
-            where_filter["Section"] = role_to_section[request.character_role]
-
+        logger.info(f"Stream query filters: {where_filter}")
         final_filter = where_filter if where_filter else None
 
         def generate():
@@ -310,7 +371,12 @@ async def query_stream(request: QueryRequest):
                     yield "No relevant information found in the indexed documents."
                     return
 
-                # Stream the generation
+                # Track thinking content separately
+                thinking_content = ""
+                main_content = ""
+                in_thinking = False
+
+                # Stream the generation with <think> tag detection
                 for token in retriever.query_stream(
                         question=request.question,
                         n_results=request.n_results,
@@ -318,9 +384,45 @@ async def query_stream(request: QueryRequest):
                         where_filter=final_filter,
                         character_role=request.character_role,
                         character_stats=request.character_stats,
-                        edition=request.edition,
+                        edition=edition_to_use,
                         model=request.model
                 ):
+                    # Detect thinking tags
+                    if "<think>" in token:
+                        in_thinking = True
+                        # Split token if it contains both tag and content
+                        parts = token.split("<think>")
+                        if parts[0]:  # Content before <think>
+                            main_content += parts[0]
+                            yield parts[0]
+                        if len(parts) > 1:  # Content after <think>
+                            thinking_content += parts[1]
+                        # Send thinking marker
+                        yield "\n__THINKING_START__\n"
+                        if len(parts) > 1 and parts[1]:
+                            yield parts[1]
+                        continue
+
+                    if "</think>" in token and in_thinking:
+                        in_thinking = False
+                        # Split token if it contains both content and closing tag
+                        parts = token.split("</think>")
+                        if parts[0]:  # Content before </think>
+                            thinking_content += parts[0]
+                            yield parts[0]
+                        # Send thinking end marker
+                        yield "\n__THINKING_END__\n"
+                        if len(parts) > 1:  # Content after </think>
+                            main_content += parts[1]
+                            yield parts[1]
+                        continue
+
+                    # Regular content
+                    if in_thinking:
+                        thinking_content += token
+                    else:
+                        main_content += token
+
                     yield token
 
                 # Send metadata after streaming
@@ -329,6 +431,8 @@ async def query_stream(request: QueryRequest):
                     "chunks": search_results['documents'],
                     "distances": search_results['distances'],
                     "metadatas": search_results['metadatas'],
+                    "thinking_content": thinking_content if thinking_content else None,
+                    "applied_filters": final_filter,
                     "done": True
                 }
 
@@ -347,7 +451,7 @@ async def query_stream(request: QueryRequest):
 
 @app.post("/index", response_model=IndexResponse)
 async def index_documents(request: IndexRequest):
-    """Manually trigger indexing."""
+    """Manually trigger enhanced indexing."""
     try:
         indexer.index_directory(
             request.directory,
@@ -355,7 +459,7 @@ async def index_documents(request: IndexRequest):
         )
         return IndexResponse(
             status="success",
-            message="Indexing complete"
+            message="Enhanced indexing complete with metadata extraction"
         )
     except Exception as e:
         logger.error(f"Indexing error: {e}")
@@ -363,7 +467,7 @@ async def index_documents(request: IndexRequest):
 
 @app.get("/documents", response_model=DocumentsResponse)
 async def list_documents():
-    """List all indexed documents."""
+    """List all indexed documents with enhanced metadata."""
     try:
         results = retriever.collection.get()
         sources = set()
@@ -377,15 +481,54 @@ async def list_documents():
         logger.error(f"Error listing documents: {e}")
         return DocumentsResponse(documents=[])
 
+@app.get("/document_stats")
+async def get_document_stats():
+    """Get statistics about indexed documents by type and edition."""
+    try:
+        results = retriever.collection.get()
+
+        stats = {
+            "total_chunks": len(results.get('ids', [])),
+            "document_types": {},
+            "editions": {},
+            "sections": {},
+            "sources": set()
+        }
+
+        for metadata in results.get('metadatas', []):
+            if not metadata:
+                continue
+
+            # Count document types
+            doc_type = metadata.get('document_type', 'unknown')
+            stats["document_types"][doc_type] = stats["document_types"].get(doc_type, 0) + 1
+
+            # Count editions
+            edition = metadata.get('edition', 'unknown')
+            stats["editions"][edition] = stats["editions"].get(edition, 0) + 1
+
+            # Count sections
+            section = metadata.get('main_section', 'unknown')
+            stats["sections"][section] = stats["sections"].get(section, 0) + 1
+
+            # Track unique sources
+            if 'source' in metadata:
+                stats["sources"].add(Path(metadata['source']).parent.name)
+
+        stats["unique_documents"] = len(stats["sources"])
+        stats["sources"] = list(stats["sources"])  # Convert set to list for JSON
+
+        return stats
+    except Exception as e:
+        logger.error(f"Error getting document stats: {e}")
+        return {"error": str(e)}
 
 @app.get("/document/{file_path:path}")
 async def get_document_content(file_path: str):
     """Get content of a specific document file."""
     try:
-        # Resolve the full path safely
         full_path = Path("data/processed_markdown") / file_path
 
-        # Security check - ensure path is within allowed directory
         if not str(full_path.resolve()).startswith(str(Path("data/processed_markdown").resolve())):
             raise HTTPException(400, "Invalid file path")
 
@@ -399,13 +542,14 @@ async def get_document_content(file_path: str):
         logger.error(f"Error reading file {file_path}: {e}")
         raise HTTPException(500, f"Error reading file: {str(e)}")
 
-
 @app.post("/search_documents")
 async def search_documents(request: dict):
-    """Search documents by filename and content."""
+    """Enhanced document search with metadata filtering."""
     try:
         query = request.get("query", "").lower()
         group_filter = request.get("group")
+        doc_type_filter = request.get("document_type")  # New filter
+        edition_filter = request.get("edition")         # New filter
         page = request.get("page", 1)
         page_size = request.get("page_size", 20)
 
@@ -415,15 +559,35 @@ async def search_documents(request: dict):
         for file_path in processed_dir.rglob("*.md"):
             group_name = file_path.parent.name
 
-            # Filter by group if specified
+            # Apply filters
             if group_filter and group_name != group_filter:
                 continue
 
-            # Search filename
+            # Check document metadata if filters specified
+            if doc_type_filter or edition_filter:
+                try:
+                    content = file_path.read_text(encoding='utf-8')
+                    # Simple YAML front matter parsing
+                    if content.startswith('---'):
+                        yaml_end = content.find('---', 3)
+                        if yaml_end > 0:
+                            yaml_content = content[3:yaml_end]
+
+                            if doc_type_filter:
+                                if f'document_type: "{doc_type_filter}"' not in yaml_content:
+                                    continue
+
+                            if edition_filter:
+                                if f'edition: "{edition_filter}"' not in yaml_content:
+                                    continue
+                except:
+                    # Skip files we can't read
+                    continue
+
+            # Search filename and content
             filename_match = query in file_path.name.lower()
             content_match = False
 
-            # Search content if no filename match
             if not filename_match and query:
                 try:
                     content = file_path.read_text(encoding='utf-8')
@@ -484,7 +648,7 @@ async def list_models():
 
 @app.get("/status", response_model=SystemStatusResponse)
 async def status():
-    """Return system status and indexed document count."""
+    """Return enhanced system status with metadata breakdown."""
     try:
         results = retriever.collection.get()
         doc_count = len(results.get('ids', []))
@@ -493,7 +657,7 @@ async def status():
             if meta and 'source' in meta:
                 sources.add(Path(meta['source']).parent.name)
 
-        # Safely get model names
+        # Get model information
         models_available = []
         try:
             models_response = ollama.list()
@@ -515,7 +679,7 @@ async def status():
             indexed_documents=len(sources),
             indexed_chunks=doc_count,
             active_jobs=len(progress_tracker.active_jobs),
-            tracking_method="polling",
+            tracking_method="polling_enhanced",
             models_available=models_available
         )
     except Exception as e:

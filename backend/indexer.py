@@ -1,10 +1,9 @@
-"""Incremental indexer for ChromaDB with embedding support and semantic chunking."""
+"""Incremental indexer for ChromaDB with embedding support and enhanced semantic chunking."""
 
-import os
 import hashlib
 import json
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 import chromadb
 from chromadb.config import Settings
 import ollama
@@ -31,67 +30,125 @@ logger = logging.getLogger(__name__)
 
 class IncrementalIndexer:
     """Manage document indexing with ChromaDB and Ollama embeddings."""
-    
+
     def __init__(
         self,
         chroma_path: str = "data/chroma_db",
         collection_name: str = "shadowrun_docs",
         embedding_model: str = "nomic-embed-text",
-        chunk_size: int = 512,           # tokens if tiktoken available, else words
-        chunk_overlap: int = 100,
+        chunk_size: int = 1024,           # Increased from 512 for better performance
+        chunk_overlap: int = 150,         # Increased proportionally
         use_semantic_splitting: bool = True
     ):
         self.chroma_path = Path(chroma_path)
         self.chroma_path.mkdir(parents=True, exist_ok=True)
-        
+
         # Initialize ChromaDB
         self.client = chromadb.PersistentClient(
             path=str(self.chroma_path),
             settings=Settings(anonymized_telemetry=False)
         )
-        
+
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
             metadata={"hnsw:space": "cosine"}
         )
-        
+
         self.embedding_model = embedding_model
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.use_semantic_splitting = use_semantic_splitting and LANGCHAIN_AVAILABLE
-        
+
         # Track indexed files
         self.index_file = self.chroma_path / "indexed_files.json"
         self.indexed_files = self._load_index_metadata()
-        
+
         # Set up tokenizer
         if TIKTOKEN_AVAILABLE:
             self.encoder = tiktoken.get_encoding("cl100k_base")
             self._count_tokens = lambda text: len(self.encoder.encode(text))
-            logger.info("Using tiktoken for accurate token counting")
+            logger.info(f"Using tiktoken for accurate token counting - chunk size: {self.chunk_size} tokens")
         else:
             self._count_tokens = lambda text: len(text.split())  # rough word count
-            logger.info("Using word-based token approximation")
+            logger.info(f"Using word-based token approximation - chunk size: {self.chunk_size} words")
 
     def _load_index_metadata(self) -> Dict:
         """Load metadata about previously indexed files."""
         if self.index_file.exists():
             return json.loads(self.index_file.read_text())
         return {}
-    
+
     def _save_index_metadata(self):
         """Save metadata about indexed files."""
         self.index_file.write_text(json.dumps(self.indexed_files, indent=2))
-    
+
     def _get_file_hash(self, file_path: Path) -> str:
         """Get hash of file content for change detection."""
         return hashlib.md5(file_path.read_bytes()).hexdigest()
 
+    def _extract_shadowrun_metadata(self, content: str, source: str) -> Dict:
+        """Extract Shadowrun-specific metadata from content."""
+        metadata = {
+            "source": source,
+            "document_type": "unknown",
+            "edition": "unknown",
+            "main_section": "General",
+            "subsection": "General"
+        }
+
+        # Detect document type from filename and content
+        filename = Path(source).name.lower()
+        content_lower = content[:2000].lower()  # Check first 2000 chars
+
+        # Document type detection
+        if any(term in filename for term in ["character", "sheet", "pc", "npc"]):
+            metadata["document_type"] = "character_sheet"
+        elif any(term in content_lower for term in ["character creation", "priority system", "attribute", "skill points"]):
+            metadata["document_type"] = "character_sheet"
+        elif any(term in filename for term in ["core", "rulebook", "rules", "manual"]):
+            metadata["document_type"] = "rulebook"
+        elif any(term in content_lower for term in ["combat", "initiative", "damage", "armor", "weapon"]):
+            metadata["document_type"] = "rulebook"
+        else:
+            metadata["document_type"] = "universe_info"
+
+        # Edition detection
+        if "shadowrun 6" in content_lower or "6th edition" in content_lower or "sr6" in content_lower:
+            metadata["edition"] = "SR6"
+        elif "shadowrun 5" in content_lower or "5th edition" in content_lower or "sr5" in content_lower:
+            metadata["edition"] = "SR5"
+        elif "shadowrun 4" in content_lower or "4th edition" in content_lower or "sr4" in content_lower:
+            metadata["edition"] = "SR4"
+        elif "shadowrun 3" in content_lower or "3rd edition" in content_lower or "sr3" in content_lower:
+            metadata["edition"] = "SR3"
+
+        # Main section detection (more comprehensive)
+        section_keywords = {
+            "Combat": ["combat", "initiative", "damage", "armor", "weapon", "attack", "defense", "wound"],
+            "Magic": ["magic", "spell", "astral", "summoning", "enchanting", "adept", "mage", "spirit"],
+            "Matrix": ["matrix", "hacking", "cyberdeck", "programs", "ic", "host", "decker", "technomancer"],
+            "Riggers": ["rigger", "drone", "vehicle", "pilot", "autosofts", "jumped in"],
+            "Gear": ["gear", "equipment", "cyberware", "bioware", "weapons", "armor", "electronics"],
+            "Character Creation": ["character creation", "priority", "attributes", "skills", "metatype", "build points"],
+            "Gamemaster": ["gamemaster", "gm", "adventure", "npc", "campaign", "plot", "scenario"],
+            "Setting": ["seattle", "sixth world", "corporations", "shadowrun", "awakening", "crash"]
+        }
+
+        for section, keywords in section_keywords.items():
+            if any(keyword in content_lower for keyword in keywords):
+                metadata["main_section"] = section
+                break
+
+        return metadata
+
     def _chunk_text_semantic(self, text: str, source: str) -> List[Dict]:
-        """Split text using Markdown headers with consistent token-based sizing."""
+        """Split text using Markdown headers with consistent token-based sizing and enhanced metadata."""
         if not self.use_semantic_splitting:
             return self._chunk_text_simple(text, source)
-            
+
+        # Extract base metadata for all chunks
+        base_metadata = self._extract_shadowrun_metadata(text, source)
+
         headers_to_split_on = [
             ("#", "Section"),
             ("##", "Subsection"),
@@ -108,7 +165,7 @@ class IncrementalIndexer:
 
         # Second: split large chunks by token/word count
         final_chunks = []
-        
+
         if TIKTOKEN_AVAILABLE:
             # Use tiktoken-aware splitter
             splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
@@ -129,8 +186,19 @@ class IncrementalIndexer:
 
         for chunk in header_chunks:
             content = chunk.page_content
-            metadata = chunk.metadata
+            chunk_metadata = chunk.metadata
             token_count = self._count_tokens(content)
+
+            # Merge base metadata with chunk-specific metadata
+            enhanced_metadata = {**base_metadata}
+
+            # Update section info from headers if available
+            if chunk_metadata.get("Section"):
+                enhanced_metadata["main_section"] = chunk_metadata["Section"]
+            if chunk_metadata.get("Subsection"):
+                enhanced_metadata["subsection"] = chunk_metadata["Subsection"]
+            elif chunk_metadata.get("Subsubsection"):
+                enhanced_metadata["subsection"] = chunk_metadata["Subsubsection"]
 
             if token_count > self.chunk_size:
                 # Split further
@@ -140,8 +208,7 @@ class IncrementalIndexer:
                         "text": doc,
                         "source": source,
                         "metadata": {
-                            **metadata,
-                            "source": source,
+                            **enhanced_metadata,
                             "chunk_part": i,
                             "token_count": self._count_tokens(doc)
                         }
@@ -151,8 +218,7 @@ class IncrementalIndexer:
                     "text": content,
                     "source": source,
                     "metadata": {
-                        **metadata,
-                        "source": source,
+                        **enhanced_metadata,
                         "token_count": token_count
                     }
                 })
@@ -160,12 +226,14 @@ class IncrementalIndexer:
         return final_chunks
 
     def _chunk_text_simple(self, text: str, source: str) -> List[Dict]:
-        """Simple word/token-based chunking fallback."""
+        """Simple word/token-based chunking fallback with enhanced metadata."""
+        base_metadata = self._extract_shadowrun_metadata(text, source)
+
         if TIKTOKEN_AVAILABLE:
             # Token-based chunking
             tokens = self.encoder.encode(text)
             chunks = []
-            
+
             for i in range(0, len(tokens), self.chunk_size - self.chunk_overlap):
                 chunk_tokens = tokens[i:i + self.chunk_size]
                 chunk_text = self.encoder.decode(chunk_tokens)
@@ -173,15 +241,16 @@ class IncrementalIndexer:
                     "text": chunk_text,
                     "source": source,
                     "metadata": {
-                        "source": source,
-                        "token_count": len(chunk_tokens)
+                        **base_metadata,
+                        "token_count": len(chunk_tokens),
+                        "chunk_index": i // (self.chunk_size - self.chunk_overlap)
                     }
                 })
         else:
             # Word-based chunking
             words = text.split()
             chunks = []
-            
+
             for i in range(0, len(words), self.chunk_size - self.chunk_overlap):
                 chunk_words = words[i:i + self.chunk_size]
                 chunk_text = " ".join(chunk_words)
@@ -189,11 +258,12 @@ class IncrementalIndexer:
                     "text": chunk_text,
                     "source": source,
                     "metadata": {
-                        "source": source,
-                        "word_count": len(chunk_words)
+                        **base_metadata,
+                        "word_count": len(chunk_words),
+                        "chunk_index": i // (self.chunk_size - self.chunk_overlap)
                     }
                 })
-        
+
         return chunks
 
     def _get_embeddings(self, texts: List[str]) -> List[List[float]]:
@@ -215,35 +285,35 @@ class IncrementalIndexer:
         """Index all markdown files in a directory."""
         directory = Path(directory)
         md_files = list(directory.rglob("*.md"))
-        
+
         files_to_index = []
         for file_path in md_files:
             file_hash = self._get_file_hash(file_path)
             relative_path = str(file_path.relative_to(directory))
-            
+
             if force_reindex or relative_path not in self.indexed_files or self.indexed_files[relative_path] != file_hash:
                 files_to_index.append(file_path)
                 self.indexed_files[relative_path] = file_hash
-        
+
         if not files_to_index:
             logger.info("No new or changed files to index")
             return
-        
-        logger.info(f"Indexing {len(files_to_index)} files...")
+
+        logger.info(f"Indexing {len(files_to_index)} files with enhanced metadata...")
         all_chunks = []
 
         for file_path in files_to_index:
             content = file_path.read_text(encoding='utf-8')
             chunks = self._chunk_text_semantic(content, str(file_path))
             all_chunks.extend(chunks)
-        
+
         if all_chunks:
             texts = [chunk['text'] for chunk in all_chunks]
             embeddings = self._get_embeddings(texts)
-            
+
             ids = [f"{hashlib.md5(chunk['text'].encode()).hexdigest()[:16]}" for chunk in all_chunks]
             metadatas = [chunk['metadata'] for chunk in all_chunks]
-            
+
             # Avoid ID collisions
             seen_ids = set()
             for i, id_ in enumerate(ids):
@@ -261,8 +331,21 @@ class IncrementalIndexer:
                 documents=texts,
                 metadatas=metadatas
             )
-            
-            logger.info(f"Added {len(all_chunks)} chunks to index")
+
+            logger.info(f"Added {len(all_chunks)} chunks to index with enhanced metadata")
+
+            # Log metadata distribution for debugging
+            doc_types = {}
+            editions = {}
+            sections = {}
+            for meta in metadatas:
+                doc_types[meta.get('document_type', 'unknown')] = doc_types.get(meta.get('document_type', 'unknown'), 0) + 1
+                editions[meta.get('edition', 'unknown')] = editions.get(meta.get('edition', 'unknown'), 0) + 1
+                sections[meta.get('main_section', 'unknown')] = sections.get(meta.get('main_section', 'unknown'), 0) + 1
+
+            logger.info(f"Document types: {doc_types}")
+            logger.info(f"Editions: {editions}")
+            logger.info(f"Sections: {sections}")
         
         self._save_index_metadata()
     

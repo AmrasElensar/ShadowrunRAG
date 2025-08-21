@@ -1,14 +1,15 @@
 """
-Gradio Frontend for Shadowrun RAG System
-Replaces Streamlit with better state management and streaming support
+Enhanced Gradio Frontend for Shadowrun RAG System
+Includes document type selection, <think> tag support, and improved filtering
 """
 
 import gradio as gr
 import requests
 import json
+import re
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional
 import threading
 import logging
 import pandas as pd
@@ -21,19 +22,25 @@ import os
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 class RAGClient:
-    """Client for interacting with the FastAPI backend."""
+    """Enhanced client for interacting with the FastAPI backend."""
 
     def __init__(self, api_url: str = API_URL):
         self.api_url = api_url
         self.active_jobs = {}
         self.lock = threading.Lock()
 
-    def upload_pdf(self, file_path: str) -> Dict:
-        """Upload a PDF and get job ID."""
+    def upload_pdf(self, file_path: str, document_type: str = "rulebook") -> Dict:
+        """Upload a PDF with document type specification."""
         try:
             with open(file_path, 'rb') as f:
                 files = {'file': (Path(file_path).name, f, 'application/pdf')}
-                response = requests.post(f"{self.api_url}/upload", files=files, timeout=60)
+                data = {'document_type': document_type}
+                response = requests.post(
+                    f"{self.api_url}/upload",
+                    files=files,
+                    data=data,
+                    timeout=60
+                )
                 response.raise_for_status()
                 return response.json()
         except Exception as e:
@@ -51,7 +58,7 @@ class RAGClient:
             return {"error": str(e)}
 
     def query_stream(self, question: str, **params) -> tuple:
-        """Stream query response with metadata."""
+        """Enhanced stream query response with <think> tag detection."""
         try:
             response = requests.post(
                 f"{self.api_url}/query_stream",
@@ -62,17 +69,46 @@ class RAGClient:
             response.raise_for_status()
 
             full_response = ""
+            thinking_content = ""
             metadata = None
             metadata_buffer = ""
             collecting_metadata = False
+            in_thinking = False
 
             for chunk in response.iter_content(chunk_size=32, decode_unicode=True):
                 if chunk:
+                    # Handle thinking tags
+                    if "__THINKING_START__" in chunk:
+                        in_thinking = True
+                        parts = chunk.split("__THINKING_START__")
+                        if parts[0]:
+                            full_response += parts[0]
+                            yield full_response, thinking_content, None, "generating"
+                        if len(parts) > 1:
+                            thinking_content += parts[1]
+                            yield full_response, thinking_content, None, "thinking"
+                        continue
+
+                    if "__THINKING_END__" in chunk and in_thinking:
+                        in_thinking = False
+                        parts = chunk.split("__THINKING_END__")
+                        if parts[0]:
+                            thinking_content += parts[0]
+                            yield full_response, thinking_content, None, "thinking"
+                        if len(parts) > 1:
+                            full_response += parts[1]
+                            yield full_response, thinking_content, None, "generating"
+                        continue
+
+                    # Handle metadata
                     if "__METADATA_START__" in chunk:
                         parts = chunk.split("__METADATA_START__")
                         if parts[0]:
-                            full_response += parts[0]
-                            yield full_response, None, "generating"
+                            if in_thinking:
+                                thinking_content += parts[0]
+                            else:
+                                full_response += parts[0]
+                            yield full_response, thinking_content, None, "generating"
 
                         collecting_metadata = True
                         if len(parts) > 1:
@@ -89,15 +125,20 @@ class RAGClient:
                                 logger.error(f"Metadata parse failed: {e}")
                             break
                     else:
-                        full_response += chunk
-                        yield full_response, None, "generating"
+                        # Regular content
+                        if in_thinking:
+                            thinking_content += chunk
+                            yield full_response, thinking_content, None, "thinking"
+                        else:
+                            full_response += chunk
+                            yield full_response, thinking_content, None, "generating"
 
             # Final yield with metadata
-            yield full_response, metadata, "complete"
+            yield full_response, thinking_content, metadata, "complete"
 
         except Exception as e:
             logger.error(f"Query failed: {e}")
-            yield f"Error: {str(e)}", None, "error"
+            yield f"Error: {str(e)}", "", None, "error"
 
     def get_models(self) -> List[str]:
         """Get available models."""
@@ -119,6 +160,16 @@ class RAGClient:
             logger.error(f"Failed to fetch documents: {e}")
             return []
 
+    def get_document_stats(self) -> Dict:
+        """Get enhanced document statistics."""
+        try:
+            response = requests.get(f"{self.api_url}/document_stats", timeout=10)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch document stats: {e}")
+            return {"error": str(e)}
+
     def get_document_content(self, file_path: str) -> Dict:
         """Get content of a specific document."""
         try:
@@ -129,12 +180,25 @@ class RAGClient:
             logger.error(f"Failed to fetch document content: {e}")
             return {"error": str(e)}
 
-    def search_documents(self, query: str, group: str = None, page: int = 1, page_size: int = 20) -> Dict:
-        """Search documents by content and filename."""
+    def search_documents(self, query: str, group: str = None, document_type: str = None,
+                        edition: str = None, page: int = 1, page_size: int = 20) -> Dict:
+        """Enhanced document search with metadata filtering."""
         try:
+            search_params = {
+                "query": query,
+                "page": page,
+                "page_size": page_size
+            }
+            if group and group != "All Groups":
+                search_params["group"] = group
+            if document_type and document_type != "All Types":
+                search_params["document_type"] = document_type
+            if edition and edition != "All Editions":
+                search_params["edition"] = edition
+
             response = requests.post(
                 f"{self.api_url}/search_documents",
-                json={"query": query, "group": group, "page": page, "page_size": page_size},
+                json=search_params,
                 timeout=60
             )
             response.raise_for_status()
@@ -172,17 +236,20 @@ client = RAGClient()
 
 # ===== UPLOAD TAB FUNCTIONS =====
 
-def process_uploads(files) -> str:
-    """Process uploaded PDFs with progress tracking."""
+def process_uploads(files, document_type: str) -> str:
+    """Process uploaded PDFs with document type specification."""
     if not files:
         return "No files selected"
+
+    if not document_type:
+        document_type = "rulebook"  # Default fallback
 
     results = []
     for file in files:
         file_name = Path(file.name).name
 
-        # Upload file
-        result = client.upload_pdf(file.name)
+        # Upload file with document type
+        result = client.upload_pdf(file.name, document_type)
         if "error" in result:
             results.append(f"❌ {file_name}: {result['error']}")
             continue
@@ -192,12 +259,12 @@ def process_uploads(files) -> str:
             results.append(f"❌ {file_name}: No job ID returned")
             continue
 
-        results.append(f"✅ {file_name}: Processing started (Job: {job_id[-8:]})")
+        results.append(f"✅ {file_name}: Processing started as {document_type} (Job: {job_id[-8:]})")
 
     return "\n".join(results)
 
 def poll_progress():
-    """Poll all active jobs and return progress info."""
+    """Enhanced progress polling with document type information."""
     try:
         response = requests.get(f"{client.api_url}/jobs", timeout=5)
         response.raise_for_status()
@@ -215,11 +282,18 @@ def poll_progress():
             progress = job_info.get("progress", 0)
             details = job_info.get("details", "")
 
-            # Extract filename from job_id
-            filename = job_id.rsplit("_", 1)[0] if "_" in job_id else job_id
+            # Extract document type and filename from job_id
+            parts = job_id.split("_")
+            if len(parts) >= 2:
+                doc_type = parts[0]
+                filename = "_".join(parts[1:-1])  # Exclude timestamp
+            else:
+                doc_type = "unknown"
+                filename = job_id
 
+            # Enhanced progress display with document type
             progress_lines.append(
-                f"📄 **{filename}**\n"
+                f"📄 **{filename}** ({doc_type})\n"
                 f"   Stage: {stage} | Progress: {progress:.0f}%\n"
                 f"   {details}"
             )
@@ -227,8 +301,6 @@ def poll_progress():
             progress_values.append(progress)
 
         progress_text = "\n\n".join(progress_lines)
-
-        # Calculate average progress
         avg_progress = sum(progress_values) / len(progress_values) if progress_values else 0
 
         return progress_text, gr.update(visible=True, value=avg_progress), avg_progress
@@ -247,18 +319,21 @@ def submit_query(
     character_stats: str,
     edition: str,
     filter_section: str,
-    filter_subsection: str
+    filter_subsection: str,
+    filter_document_type: str,
+    filter_edition: str
 ):
-    """Submit query and stream response."""
+    """Enhanced query submission with improved filtering and <think> tag support."""
     if not question:
-        yield "Please enter a question", "", []
+        yield "Please enter a question", "", "", [], gr.update(visible=False)
         return
 
-    # Prepare parameters
+    # Prepare enhanced parameters
     params = {
         "n_results": n_results,
         "query_type": query_type.lower(),
-        "model": model
+        "model": model,
+        "edition": edition if edition != "None" else "SR5"  # Default to SR5
     }
 
     # Add optional parameters
@@ -266,17 +341,19 @@ def submit_query(
         params["character_role"] = character_role.lower().replace(" ", "_")
     if character_stats:
         params["character_stats"] = character_stats
-    if edition != "None":
-        params["edition"] = edition
     if filter_section != "All":
         params["filter_section"] = filter_section
     if filter_subsection:
         params["filter_subsection"] = filter_subsection
+    if filter_document_type != "All Types":
+        params["filter_document_type"] = filter_document_type
+    if filter_edition != "All Editions":
+        params["filter_edition"] = filter_edition
 
-    # Stream response
-    for response, metadata, status in client.query_stream(question, **params):
+    # Stream response with thinking support
+    for response, thinking, metadata, status in client.query_stream(question, **params):
         if status == "error":
-            yield response, "", []
+            yield response, "", "", [], gr.update(visible=False)
         elif status == "complete" and metadata:
             # Format sources
             sources_text = ""
@@ -284,32 +361,47 @@ def submit_query(
                 sources_list = [Path(s).name for s in metadata["sources"]]
                 sources_text = "**Sources:**\n" + "\n".join([f"📄 {s}" for s in sources_list])
 
-            # Create chunks dataframe for display - fix format
+            # Show applied filters for debugging
+            if metadata.get("applied_filters"):
+                filters_text = f"\n\n**Applied Filters:** {metadata['applied_filters']}"
+                sources_text += filters_text
+
+            # Create chunks dataframe
             chunks_data = []
             if metadata.get("chunks"):
                 for i, (chunk, dist) in enumerate(zip(
                         metadata.get("chunks", []),
                         metadata.get("distances", [])
                 )):
-                    # Gradio Dataframe expects list of lists, not list of dicts
                     relevance = f"{(1 - dist):.2%}" if dist else "N/A"
                     content = chunk[:200] + "..." if len(chunk) > 200 else chunk
-                    chunks_data.append([relevance, content])  # List instead of dict
+                    chunks_data.append([relevance, content])
 
-            yield response, sources_text, chunks_data
+            # Show thinking accordion if there's thinking content
+            thinking_visible = bool(thinking and thinking.strip())
+
+            yield response, thinking, sources_text, chunks_data, gr.update(visible=thinking_visible)
         else:
-            # Still generating
-            yield response + "▌", "", []
+            # Still generating - show thinking accordion if content exists
+            thinking_visible = bool(thinking and thinking.strip())
+            cursor = "▌" if status == "generating" else "🤔" if status == "thinking" else ""
+            yield response + cursor, thinking, "", [], gr.update(visible=thinking_visible)
+
 
 # ===== DOCUMENT TAB FUNCTIONS =====
 
 def refresh_documents():
-    """Refresh document library with accordion structure."""
+    """Enhanced document library refresh with metadata statistics."""
     docs = client.get_documents()
-    status = client.get_status()
+    stats = client.get_document_stats()
+
+    if "error" in stats:
+        return f"Error loading stats: {stats['error']}", {}, pd.DataFrame(), "", gr.update(choices=[]), gr.update(
+            choices=[]), gr.update(choices=[])
 
     if not docs:
-        return "No documents indexed yet", {}, pd.DataFrame(), "", gr.update(choices=[])
+        return "No documents indexed yet", {}, pd.DataFrame(), "", gr.update(choices=[]), gr.update(
+            choices=[]), gr.update(choices=[])
 
     # Group documents by parent directory
     doc_groups = {}
@@ -332,32 +424,67 @@ def refresh_documents():
                 "path": str(doc_path)
             })
 
-    # Format statistics
-    indexed_docs = status.get('indexed_documents', 0)
-    indexed_chunks = status.get('indexed_chunks', 0)
-    active_jobs = status.get('active_jobs', 0)
+    # Enhanced statistics with metadata breakdown
+    total_chunks = stats.get('total_chunks', 0)
+    unique_docs = stats.get('unique_documents', 0)
+    active_jobs = 0  # Will be updated from status
+
+    try:
+        status = client.get_status()
+        active_jobs = status.get('active_jobs', 0)
+    except:
+        pass
 
     stats_text = f"""
-**System Statistics:**
-- Documents: {indexed_docs}
-- Text Chunks: {indexed_chunks}
+**Enhanced System Statistics:**
+- Unique Documents: {unique_docs}
+- Total Text Chunks: {total_chunks}
 - Active Jobs: {active_jobs}
-- Status: {status.get('status', 'unknown')}
+- Document Types: {len(stats.get('document_types', {}))}
+- Editions Found: {len(stats.get('editions', {}))}
+- Sections Detected: {len(stats.get('sections', {}))}
 """
 
-    # Create proper stats dataframe
-    avg_chunks = indexed_chunks / max(indexed_docs, 1) if indexed_docs > 0 else 0
-    stats_df = pd.DataFrame([
-        {"Metric": "Documents", "Value": indexed_docs},
-        {"Metric": "Text Chunks", "Value": indexed_chunks},
-        {"Metric": "Avg Chunks/Doc", "Value": f"{avg_chunks:.1f}"},
-        {"Metric": "Active Jobs", "Value": active_jobs},
-    ])
+    # Create detailed stats dataframe
+    stats_rows = [
+        {"Category": "Documents", "Count": unique_docs},
+        {"Category": "Text Chunks", "Count": total_chunks},
+        {"Category": "Active Jobs", "Count": active_jobs},
+    ]
 
+    # Add document type breakdown
+    doc_types = stats.get('document_types', {})
+    for doc_type, count in doc_types.items():
+        stats_rows.append({"Category": f"Type: {doc_type}", "Count": count})
+
+    # Add edition breakdown
+    editions = stats.get('editions', {})
+    for edition, count in editions.items():
+        stats_rows.append({"Category": f"Edition: {edition}", "Count": count})
+
+    stats_df = pd.DataFrame(stats_rows)
+
+    # Update dropdown choices
     group_choices = ["All Groups"] + list(doc_groups.keys())
 
-    return f"Total: {len(docs)} documents in {len(doc_groups)} groups", doc_groups, stats_df, stats_text, gr.update(
-        choices=group_choices)
+    # Document type choices from stats
+    type_choices = ["All Types"] + list(doc_types.keys())
+
+    # Edition choices from stats
+    edition_choices = ["All Editions"] + list(editions.keys())
+
+    print(f"DEBUG: doc_groups keys: {list(doc_groups.keys()) if doc_groups else 'None'}")
+    print(f"DEBUG: group_choices: {group_choices}")
+
+    return (
+        f"Total: {len(docs)} documents in {len(doc_groups)} groups",
+        doc_groups,
+        stats_df,
+        stats_text,
+        gr.update(choices=group_choices),
+        gr.update(choices=type_choices),
+        gr.update(choices=edition_choices)
+    )
 
 
 def load_document_group(group_name, doc_groups):
@@ -389,16 +516,21 @@ def handle_library_file_selection(selected_file, group_name, doc_groups):
     return "File not found"
 
 
-def search_docs_fn(query: str, selected_group: str, page: int = 1):
-    """Search documents and return radio button choices."""
+def search_docs_fn(query: str, selected_group: str, selected_type: str, selected_edition: str, page: int = 1):
+    """Enhanced document search with metadata filtering."""
     global search_file_paths
-    search_file_paths = {}  # Reset the mapping
+    search_file_paths = {}
 
     if not query.strip():
         return "Enter a search query to find documents", gr.update(choices=[], visible=False), ""
 
     group_filter = None if selected_group == "All Groups" else selected_group
-    results = client.search_documents(query, group_filter, page, 20)
+    type_filter = None if selected_type == "All Types" else selected_type
+    edition_filter = None if selected_edition == "All Editions" else selected_edition
+
+    results = client.search_documents(
+        query, group_filter, type_filter, edition_filter, page, 20
+    )
 
     if "error" in results:
         return f"Search error: {results['error']}", gr.update(choices=[], visible=False), ""
@@ -420,9 +552,19 @@ def search_docs_fn(query: str, selected_group: str, page: int = 1):
 
         display_name = f"{match_indicator} {file_info['filename']} | 📂 {file_info['group']}"
         choices.append(display_name)
-        search_file_paths[display_name] = file_info['file_path']  # Store mapping
+        search_file_paths[display_name] = file_info['file_path']
 
-    summary_text = f"**Found {total} files** (Page {current_page}/{total_pages}) - Click to view:"
+    # Enhanced summary with filter info
+    filter_info = []
+    if group_filter:
+        filter_info.append(f"Group: {group_filter}")
+    if type_filter:
+        filter_info.append(f"Type: {type_filter}")
+    if edition_filter:
+        filter_info.append(f"Edition: {edition_filter}")
+
+    filter_text = f" | Filters: {', '.join(filter_info)}" if filter_info else ""
+    summary_text = f"**Found {total} files** (Page {current_page}/{total_pages}){filter_text} - Click to view:"
 
     # Auto-load first result
     first_content = load_document_content(files[0]['file_path'])
@@ -441,12 +583,12 @@ def handle_file_selection(selected_choice):
     return load_document_content(file_path)
 
 
-# Global variable to store file paths (not ideal but works)
+# Global variable to store file paths
 search_file_paths = {}
 
 
 def load_document_content(file_path: str):
-    """Load and display document content."""
+    """Load and display document content with enhanced metadata display."""
     if not file_path:
         return "No file selected"
 
@@ -458,54 +600,60 @@ def load_document_content(file_path: str):
     content = result.get("content", "")
     filename = Path(file_path).name
 
-    # Format with nice header and padding
+    # Extract and format YAML metadata if present
+    metadata_display = ""
+    if content.startswith('---'):
+        yaml_end = content.find('---', 3)
+        if yaml_end > 0:
+            yaml_content = content[3:yaml_end].strip()
+            main_content = content[yaml_end + 3:].strip()
+
+            # Parse key metadata for display
+            metadata_lines = []
+            for line in yaml_content.split('\n'):
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip()
+                    value = value.strip().strip('"')
+                    if key in ['document_type', 'edition', 'primary_focus']:
+                        metadata_lines.append(f"**{key.title()}:** {value}")
+
+            if metadata_lines:
+                metadata_display = f"\n\n📊 **Metadata:**  \n" + "  \n".join(metadata_lines) + "\n\n---\n\n"
+        else:
+            main_content = content
+    else:
+        main_content = content
+
+    # Format with enhanced header
     formatted_content = f"""# 📄 {filename}
 
-**Path:** `{file_path}`
+**Path:** `{file_path}`{metadata_display}
 
----
-
-{content}"""
+{main_content}"""
 
     return formatted_content
 
 
-def parse_file_selection(search_results_text: str, evt: gr.SelectData):
-    """Parse clicked file from search results."""
-    try:
-        lines = search_results_text.split('\n')
-        clicked_line_idx = evt.index[0] if hasattr(evt, 'index') else 0
-
-        # Find the file path in the clicked section
-        for i in range(clicked_line_idx, min(clicked_line_idx + 5, len(lines))):
-            line = lines[i]
-            if '📄 Path:' in line:
-                # Extract path from markdown code block
-                path = line.split('`')[1] if '`' in line else ""
-                return load_document_content(path)
-
-        return "Could not extract file path from selection"
-    except Exception as e:
-        return f"Error parsing selection: {str(e)}"
-
 def reindex_documents(force_reindex: bool):
-    """Trigger document reindexing."""
+    """Trigger enhanced document reindexing."""
     result = client.reindex(force=force_reindex)
     if "error" in result:
         return f"❌ Reindexing failed: {result['error']}"
-    return "✅ Reindexing complete!"
+    return "✅ Enhanced reindexing complete with metadata extraction!"
 
-# ===== BUILD GRADIO INTERFACE =====
+
+# ===== BUILD ENHANCED GRADIO INTERFACE =====
 
 def build_interface():
-    """Build the complete Gradio interface."""
+    """Build the enhanced Gradio interface with document types and thinking support."""
 
     with gr.Blocks(title="🎲 Shadowrun RAG Assistant", theme=gr.themes.Soft()) as app:
         gr.Markdown("# 🎲 Shadowrun RAG Assistant")
-        gr.Markdown("*Your AI-powered guide to the Sixth World*")
+        gr.Markdown("*Your Enhanced AI-powered Guide to the Sixth World*")
 
         with gr.Tabs():
-            # ===== QUERY TAB =====
+            # ===== ENHANCED QUERY TAB =====
             with gr.Tab("💬 Query"):
                 with gr.Row():
                     with gr.Column(scale=3):
@@ -520,7 +668,15 @@ def build_interface():
                             clear_btn = gr.ClearButton(components=[question_input], value="Clear")
 
                         answer_output = gr.Markdown(label="Answer")
-                        sources_output = gr.Markdown(label="Sources")
+
+                        # Enhanced thinking accordion with visual indicator
+                        with gr.Accordion("🤔 Model Thinking Process", open=False, visible=False) as thinking_accordion:
+                            thinking_output = gr.Markdown(
+                                label="AI Reasoning",
+                                value="*The model's reasoning process will appear here...*"
+                            )
+
+                        sources_output = gr.Markdown(label="Sources & Filters")
 
                         with gr.Accordion("📊 Retrieved Chunks", open=False):
                             chunks_output = gr.Dataframe(
@@ -529,7 +685,7 @@ def build_interface():
                             )
 
                     with gr.Column(scale=1):
-                        gr.Markdown("### ⚙️ Configuration")
+                        gr.Markdown("### ⚙️ Enhanced Configuration")
 
                         model_select = gr.Dropdown(
                             choices=client.get_models() or ["llama3:8b-instruct-q4_K_M"],
@@ -552,9 +708,9 @@ def build_interface():
                         with gr.Accordion("👤 Character Context", open=False):
                             character_role_select = gr.Dropdown(
                                 choices=["None", "Decker", "Mage", "Street Samurai",
-                                        "Rigger", "Adept", "Technomancer", "Face"],
+                                         "Rigger", "Adept", "Technomancer", "Face"],
                                 value="None",
-                                label="Character Role"
+                                label="Character Role (overrides section filter)"
                             )
 
                             character_stats_input = gr.Textbox(
@@ -563,15 +719,17 @@ def build_interface():
                             )
 
                             edition_select = gr.Dropdown(
-                                choices=["None", "SR5", "SR6", "SR4"],
-                                value="None",
+                                choices=["SR5", "SR6", "SR4", "SR3", "None"],  # SR5 first as default
+                                value="SR5",  # Default to SR5
                                 label="Preferred Edition"
                             )
 
-                        with gr.Accordion("🔍 Filters", open=False):
+                        with gr.Accordion("🔍 Enhanced Filters", open=False):
+                            gr.Markdown("*Character role selection overrides section filter*")
+
                             section_filter = gr.Dropdown(
                                 choices=["All", "Combat", "Matrix", "Magic", "Gear",
-                                        "Character Creation", "Riggers", "Technomancy"],
+                                         "Character Creation", "Riggers", "Technomancy", "Social"],
                                 value="All",
                                 label="Filter by Section"
                             )
@@ -581,21 +739,43 @@ def build_interface():
                                 placeholder="e.g., Hacking, Spellcasting"
                             )
 
-                # Wire up query submission
+                            document_type_filter = gr.Dropdown(
+                                choices=["All Types", "rulebook", "character_sheet", "universe_info", "adventure"],
+                                value="All Types",
+                                label="Filter by Document Type"
+                            )
+
+                            edition_filter = gr.Dropdown(
+                                choices=["All Editions", "SR5", "SR6", "SR4", "SR3"],
+                                value="All Editions",
+                                label="Filter by Edition"
+                            )
+
+                # Wire up enhanced query submission
                 submit_btn.click(
                     fn=submit_query,
                     inputs=[
                         question_input, model_select, n_results_slider,
                         query_type_select, character_role_select, character_stats_input,
-                        edition_select, section_filter, subsection_filter
+                        edition_select, section_filter, subsection_filter,
+                        document_type_filter, edition_filter
                     ],
-                    outputs=[answer_output, sources_output, chunks_output]
+                    outputs=[answer_output, thinking_output, sources_output, chunks_output, thinking_accordion]
                 )
 
-            # ===== UPLOAD TAB =====
+            # ===== ENHANCED UPLOAD TAB =====
             with gr.Tab("📤 Upload"):
                 with gr.Row():
                     with gr.Column():
+                        gr.Markdown("### 📄 Enhanced Document Upload")
+
+                        document_type_select = gr.Dropdown(
+                            choices=["rulebook", "character_sheet", "universe_info", "adventure"],
+                            value="rulebook",
+                            label="Document Type",
+                            info="Affects processing strategy and metadata"
+                        )
+
                         file_upload = gr.File(
                             label="Upload PDFs",
                             file_types=[".pdf"],
@@ -610,7 +790,6 @@ def build_interface():
                             interactive=False
                         )
 
-                        # Progress indicator (not a component, just for display)
                         progress_display = gr.Number(
                             label="Overall Progress (%)",
                             value=0,
@@ -622,9 +801,29 @@ def build_interface():
                             check_progress_btn = gr.Button("🔄 Check Progress")
                             auto_refresh = gr.Checkbox(label="Auto-refresh progress", value=False)
 
-                        progress_status = gr.Markdown(label="Processing Status")
+                        progress_status = gr.Markdown(label="Enhanced Processing Status")
 
                     with gr.Column():
+                        gr.Markdown("### 📋 Document Type Guide")
+
+                        gr.Markdown("""
+                        **📚 Rulebook**: Core rules, supplements, source books
+                        - Optimized for rule extraction and semantic chunking
+                        - Detects sections: Combat, Magic, Matrix, etc.
+
+                        **👤 Character Sheet**: PC/NPC sheets, character data
+                        - Faster processing with table detection
+                        - Smaller chunks for precise character info
+
+                        **🌍 Universe Info**: Lore, setting, background material
+                        - Focuses on narrative content and world-building
+                        - Detects corporations, locations, timeline events
+
+                        **🎯 Adventure**: Scenarios, missions, campaigns
+                        - Optimized for plot hooks and encounter data
+                        - Extracts NPCs, locations, and story elements
+                        """)
+
                         gr.Markdown("### 🔧 Manual Operations")
 
                         reindex_btn = gr.Button("🔄 Re-index All Documents")
@@ -632,29 +831,30 @@ def build_interface():
 
                         reindex_output = gr.Textbox(label="Operation Result", lines=2)
 
-                # Wire up upload functionality
-                upload_btn.click(
-                    fn=process_uploads,
-                    inputs=[file_upload],
-                    outputs=[upload_status]
-                )
+                        # Wire up enhanced upload functionality
+                        upload_btn.click(
+                            fn=process_uploads,
+                            inputs=[file_upload, document_type_select],
+                            outputs=[upload_status]
+                        )
 
-                check_progress_btn.click(
-                    fn=poll_progress,
-                    outputs=[progress_status, progress_display, gr.State()]
-                )
+                        check_progress_btn.click(
+                            fn=poll_progress,
+                            outputs=[progress_status, progress_display, gr.State()]
+                        )
 
-                reindex_btn.click(
-                    fn=lambda: reindex_documents(True),
-                    outputs=[reindex_output]
-                )
+                        reindex_btn.click(
+                            fn=lambda: reindex_documents(True),
+                            outputs=[reindex_output]
+                        )
 
-                index_new_btn.click(
-                    fn=lambda: reindex_documents(False),
-                    outputs=[reindex_output]
-                )
+                        index_new_btn.click(
+                            fn=lambda: reindex_documents(False),
+                            outputs=[reindex_output]
+                        )
 
-                # Auto-refresh timer
+                        # Enhanced auto-refresh timer
+
                 def auto_refresh_progress(enable):
                     if enable:
                         return poll_progress()
@@ -671,27 +871,42 @@ def build_interface():
                     outputs=[progress_status, progress_display, gr.State()]
                 )
 
-            # ===== DOCUMENTS TAB =====
+            # ===== ENHANCED DOCUMENTS TAB =====
             with gr.Tab("📚 Documents"):
                 with gr.Row():
-                    # Left Panel - Search & Library
+                    # Left Panel - Enhanced Search & Library
                     with gr.Column(scale=1):
                         refresh_docs_btn = gr.Button("🔄 Refresh Document Library")
 
-                        # Search Results Accordion
-                        with gr.Accordion("🔍 Search Documents", open=True):
+                        # Enhanced Search Results Accordion
+                        with gr.Accordion("🔍 Enhanced Document Search", open=True):
                             with gr.Row():
                                 search_query = gr.Textbox(
                                     label="Search Query",
                                     placeholder="Search filenames and content...",
                                     scale=2
                                 )
+
+                            with gr.Row():
                                 group_filter = gr.Dropdown(
                                     label="Filter by Group",
                                     choices=["All Groups"],
                                     value="All Groups",
                                     scale=1
                                 )
+                                type_filter = gr.Dropdown(
+                                    label="Filter by Type",
+                                    choices=["All Types"],
+                                    value="All Types",
+                                    scale=1
+                                )
+                                edition_filter = gr.Dropdown(
+                                    label="Filter by Edition",
+                                    choices=["All Editions"],
+                                    value="All Editions",
+                                    scale=1
+                                )
+
                             search_btn = gr.Button("🔍 Search", variant="primary")
 
                             search_summary = gr.Markdown(
@@ -724,34 +939,37 @@ def build_interface():
                                 interactive=True
                             )
 
-                        # Statistics Accordion
-                        with gr.Accordion("📊 Statistics", open=False):
+                        # Enhanced Statistics Accordion
+                        with gr.Accordion("📊 Enhanced Statistics", open=False):
                             stats_display = gr.Markdown(label="System Stats")
                             stats_table = gr.Dataframe(
-                                label="Metrics",
-                                headers=["Metric", "Value"],
-                                datatype=["str", "str"]
+                                label="Detailed Metrics",
+                                headers=["Category", "Count"],
+                                datatype=["str", "number"]
                             )
 
-                    # Right Panel - Document Viewer
+                    # Right Panel - Enhanced Document Viewer
                     with gr.Column(scale=1):
                         with gr.Group():
-                            gr.Markdown("### 📖 Document Viewer")
+                            gr.Markdown("### 📖 Enhanced Document Viewer")
                             document_content = gr.Markdown(
-                                value="🔍 Search for documents or browse the library to view content",
+                                value="🔍 Search for documents or browse the library to view content with metadata",
                                 label="Content",
                                 elem_classes=["document-viewer"]
                             )
 
-                # Wire up functionality
+                # Wire up enhanced functionality
                 refresh_docs_btn.click(
                     fn=refresh_documents,
-                    outputs=[library_summary, doc_groups_state, stats_table, stats_display, group_filter]
+                    outputs=[
+                        library_summary, doc_groups_state, stats_table, stats_display,
+                        group_filter, type_filter, edition_filter
+                    ]
                 )
 
                 search_btn.click(
                     fn=search_docs_fn,
-                    inputs=[search_query, group_filter],
+                    inputs=[search_query, group_filter, type_filter, edition_filter],
                     outputs=[search_summary, file_selector, document_content]
                 )
 
@@ -775,10 +993,13 @@ def build_interface():
                     outputs=[document_content]
                 )
 
-                # Auto-load on startup
+                # Enhanced auto-load on startup
                 app.load(
                     fn=refresh_documents,
-                    outputs=[library_summary, doc_groups_state, stats_table, stats_display, group_filter]
+                    outputs=[
+                        library_summary, doc_groups_state, stats_table, stats_display,
+                        group_filter, type_filter, edition_filter
+                    ]
                 ).then(
                     fn=lambda doc_groups: gr.update(choices=list(doc_groups.keys()) if doc_groups else []),
                     inputs=[doc_groups_state],
@@ -788,29 +1009,34 @@ def build_interface():
             # ===== SESSION NOTES TAB =====
             with gr.Tab("📝 Session Notes"):
                 gr.Markdown("""
-                ### 🔧 Session Notes - Coming Soon!
-                
-                This feature will allow you to:
-                - Upload and manage session notes
-                - Query past events and NPCs
-                - Track ongoing plot threads
-                - Search across your entire campaign
-                
-                For now, upload session notes as PDFs in the Upload tab.
+                ### 🔧 Session Notes - Enhanced Features Coming Soon!
+
+                **Enhanced features will include:**
+                - **Campaign Management**: Upload session notes as "adventure" type documents
+                - **NPC Tracking**: Automatic extraction of character names and relationships  
+                - **Plot Thread Analysis**: AI-powered detection of ongoing story elements
+                - **Timeline Integration**: Chronological organization of campaign events
+                - **Cross-Reference Search**: Find connections between sessions and rulebook content
+
+                **For now:**
+                - Upload session notes as PDFs using **"adventure"** document type in Upload tab
+                - Search and query them through the main Query interface
+                - They'll be processed with adventure-optimized extraction
                 """)
 
-        # Footer
+        # Enhanced Footer
         gr.Markdown("---")
         gr.Markdown(
             """
             <center>
-            <small>🎲 Shadowrun RAG Assistant v3.0 | Powered by Gradio, Ollama & ChromaDB</small>
+            <small>🎲 Shadowrun RAG Assistant v4.0 | Enhanced with Document Types, Think Tags & SR5 Defaults</small><br>
+            <small>Powered by Gradio, Ollama & ChromaDB | Character Role Precedence Active</small>
             </center>
             """,
             elem_classes=["footer"]
         )
 
-        # Custom CSS for better spacing and styling
+        # Enhanced Custom CSS with thinking indicator
         gr.HTML("""
         <style>
         .prose {
@@ -838,27 +1064,56 @@ def build_interface():
         .gradio-textbox, .gradio-dropdown { 
             margin-bottom: 0.5rem !important; 
         }
+
+        /* Enhanced thinking indicator */
+        .thinking-active {
+            border-left: 4px solid #ff6b6b !important;
+            background: rgba(255, 107, 107, 0.1) !important;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { border-left-color: #ff6b6b; }
+            50% { border-left-color: #ffd93d; }
+            100% { border-left-color: #ff6b6b; }
+        }
+
+        /* Document type indicators */
+        .doc-type-rulebook { border-left: 3px solid #4CAF50; }
+        .doc-type-character { border-left: 3px solid #2196F3; }
+        .doc-type-universe { border-left: 3px solid #FF9800; }
+        .doc-type-adventure { border-left: 3px solid #9C27B0; }
         </style>
         """)
     return app
 
+
 # ===== MAIN EXECUTION =====
 
 if __name__ == "__main__":
-    print("🚀 Starting Gradio frontend for Shadowrun RAG...")
+    print("🚀 Starting Enhanced Gradio frontend for Shadowrun RAG...")
     print(f"📡 Connecting to API at: {API_URL}")
 
-    # Check API connection
+    # Check API connection with enhanced info
     try:
         status = client.get_status()
+        stats = client.get_document_stats()
+
         print(f"✅ API Status: {status.get('status', 'unknown')}")
         print(f"📚 Indexed documents: {status.get('indexed_documents', 0)}")
         print(f"📊 Indexed chunks: {status.get('indexed_chunks', 0)}")
+
+        if not isinstance(stats, dict) or "error" not in stats:
+            doc_types = stats.get('document_types', {})
+            editions = stats.get('editions', {})
+            print(f"📋 Document types: {list(doc_types.keys())}")
+            print(f"🎲 Editions found: {list(editions.keys())}")
+
     except Exception as e:
         print(f"⚠️ Warning: Could not connect to API: {e}")
-        print("Make sure the FastAPI backend is running!")
+        print("Make sure the enhanced FastAPI backend is running!")
 
-    # Build and launch interface
+    # Build and launch enhanced interface
     app = build_interface()
     app.launch(
         server_name="0.0.0.0",

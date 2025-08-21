@@ -1,10 +1,9 @@
-"""PDF to Markdown converter with simplified synchronous progress tracking."""
+"""PDF to Markdown converter with enhanced metadata extraction and document type awareness."""
 import json
-import os
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, Optional, Callable
 import traceback
 
 # unstructured imports
@@ -131,10 +130,11 @@ class PDFProcessor:
     def __init__(
         self,
         output_dir: str = "data/processed_markdown",
-        chunk_size: int = 1024,
+        chunk_size: int = 1024,  # Updated to match indexer
         use_ocr: bool = True,
         debug_mode: bool = True,
-        progress_callback: Optional[Callable[[str, float, str], None]] = None
+        progress_callback: Optional[Callable[[str, float, str], None]] = None,
+        document_type: str = "rulebook"  # New parameter for document type
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -142,14 +142,110 @@ class PDFProcessor:
         self.use_ocr = use_ocr
         self.debug_mode = debug_mode
         self.progress_callback = progress_callback
+        self.document_type = document_type  # Store document type for processing
 
         # Create debug directory
         if debug_mode:
             self.debug_dir = self.output_dir / "_debug"
             self.debug_dir.mkdir(exist_ok=True)
 
+    def _detect_shadowrun_content(self, text: str, filename: str) -> Dict[str, str]:
+        """Enhanced Shadowrun-specific content detection."""
+        content_lower = text[:3000].lower()  # Analyze first 3000 chars
+        filename_lower = filename.lower()
+
+        metadata = {
+            "edition": "unknown",
+            "document_type": self.document_type,  # Use provided type as default
+            "primary_focus": "general",
+            "detected_sections": []
+        }
+
+        # Edition detection with more patterns
+        edition_patterns = {
+            "SR6": ["shadowrun 6", "6th edition", "sr6", "sixth edition", "catalyst game labs 2019", "catalyst 2019"],
+            "SR5": ["shadowrun 5", "5th edition", "sr5", "fifth edition", "catalyst game labs 2013", "catalyst 2013"],
+            "SR4": ["shadowrun 4", "4th edition", "sr4", "fourth edition", "catalyst game labs 2005", "wizkids"],
+            "SR3": ["shadowrun 3", "3rd edition", "sr3", "third edition", "fasa corporation"],
+            "SR2": ["shadowrun 2", "2nd edition", "sr2", "second edition"],
+            "SR1": ["shadowrun 1", "1st edition", "sr1", "first edition", "fasa 1989"]
+        }
+
+        for edition, patterns in edition_patterns.items():
+            if any(pattern in content_lower or pattern in filename_lower for pattern in patterns):
+                metadata["edition"] = edition
+                break
+
+        # Document type refinement based on content analysis
+        type_indicators = {
+            "character_sheet": [
+                "character sheet", "player character", "npc", "attributes:", "skills:",
+                "metatype:", "priority system", "karma", "nuyen", "contacts:",
+                "cyberware:", "bioware:", "spells known", "adept powers"
+            ],
+            "rulebook": [
+                "table of contents", "chapter", "game master", "dice pool",
+                "threshold", "glitch", "critical glitch", "extended test",
+                "opposed test", "teamwork test", "rule", "modifier"
+            ],
+            "universe_info": [
+                "sixth world", "awakening", "crash of", "matrix 2.0",
+                "corporate court", "dragon", "immortal elf", "history",
+                "timeline", "shadowrunner", "mr. johnson", "fixers"
+            ],
+            "adventure": [
+                "adventure", "scenario", "gamemaster", "handout",
+                "scene", "encounter", "npc stats", "plot hook",
+                "mission", "shadowrun", "team briefing"
+            ]
+        }
+
+        # Score each type
+        type_scores = {}
+        for doc_type, indicators in type_indicators.items():
+            score = sum(1 for indicator in indicators if indicator in content_lower)
+            type_scores[doc_type] = score
+
+        # Override document type if strong indicators found
+        if type_scores:
+            best_type = max(type_scores, key=type_scores.get)
+            if type_scores[best_type] > 2:  # Threshold for confidence
+                metadata["document_type"] = best_type
+
+        # Section detection
+        section_patterns = {
+            "Combat": ["combat", "initiative", "damage", "armor", "weapon", "attack", "defense"],
+            "Magic": ["magic", "spell", "astral", "summoning", "enchanting", "adept", "mage"],
+            "Matrix": ["matrix", "hacking", "cyberdeck", "programs", "ic", "host", "decker"],
+            "Riggers": ["rigger", "drone", "vehicle", "pilot", "autosofts", "jumped in"],
+            "Character Creation": ["character creation", "priority", "attributes", "skills", "metatype"],
+            "Gear": ["gear", "equipment", "cyberware", "bioware", "weapons", "armor"],
+            "Gamemaster": ["gamemaster", "gm", "adventure", "npc", "campaign"],
+            "Setting": ["seattle", "corps", "corporations", "sixth world", "awakening"]
+        }
+
+        detected_sections = []
+        for section, patterns in section_patterns.items():
+            if any(pattern in content_lower for pattern in patterns):
+                detected_sections.append(section)
+
+        metadata["detected_sections"] = detected_sections
+
+        # Determine primary focus
+        if detected_sections:
+            # Use most mentioned section as primary focus
+            section_counts = {}
+            for section, patterns in section_patterns.items():
+                count = sum(content_lower.count(pattern) for pattern in patterns)
+                section_counts[section] = count
+
+            if section_counts:
+                metadata["primary_focus"] = max(section_counts, key=section_counts.get)
+
+        return metadata
+
     def process_pdf(self, pdf_path: str, force_reparse: bool = False) -> Dict[str, str]:
-        """Process PDF with simplified synchronous progress tracking."""
+        """Process PDF with enhanced metadata extraction and document type awareness."""
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
@@ -164,7 +260,7 @@ class PDFProcessor:
             logger.info(f"Skipping {pdf_name} (already processed)")
             return self._load_existing_files(output_subdir)
 
-        logger.info(f"Processing {pdf_path} with simplified progress tracking")
+        logger.info(f"Processing {pdf_path} as {self.document_type} with enhanced metadata extraction")
 
         # Set up progress tracking via logging
         progress_handler = None
@@ -179,9 +275,9 @@ class PDFProcessor:
                 logging.getLogger().addHandler(progress_handler)
 
                 # Initial progress
-                self.progress_callback("starting", 5, "Setting up PDF processing...")
+                self.progress_callback("starting", 5, f"Setting up {self.document_type} processing...")
 
-            # Stage 1: Extract elements using unstructured (this is where the real work happens)
+            # Stage 1: Extract elements using unstructured
             logger.info("Reading PDF for file: %s ...", pdf_path)
             elements = self._extract_elements_with_fallbacks(pdf_path)
 
@@ -191,9 +287,17 @@ class PDFProcessor:
 
             logger.info("hi_res strategy succeeded: %d elements", len(elements))
 
+            # Stage 1.5: Enhanced content analysis
+            if self.progress_callback:
+                self.progress_callback("analyzing", 55, "Analyzing Shadowrun content...")
+
+            # Get full text for content analysis
+            full_text = "\n".join(str(elem) for elem in elements[:50])  # First 50 elements for analysis
+            content_metadata = self._detect_shadowrun_content(full_text, pdf_name)
+
             # Stage 2: Debug and analyze
             if self.debug_mode:
-                self._debug_elements(elements, pdf_name)
+                self._debug_elements(elements, pdf_name, content_metadata)
 
             # Stage 3: Clean elements
             cleaned_elements = self._clean_elements(elements)
@@ -203,7 +307,7 @@ class PDFProcessor:
 
             logger.info("Cleaned elements: %d from %d", len(cleaned_elements), len(elements))
 
-            # Stage 4: Create chunks
+            # Stage 4: Create chunks with document type awareness
             logger.info("Attempting chunk_by_title...")
             chunks = self._create_chunks_with_fallbacks(cleaned_elements)
 
@@ -213,18 +317,18 @@ class PDFProcessor:
 
             logger.info("chunk_by_title succeeded: %d chunks", len(chunks))
 
-            # Stage 5: Save files
+            # Stage 5: Save files with enhanced metadata
             if self.progress_callback:
-                self.progress_callback("saving", 90, "Saving markdown files...")
-            saved_files = self._save_chunks(chunks, output_subdir, pdf_name)
+                self.progress_callback("saving", 90, "Saving markdown files with metadata...")
+            saved_files = self._save_chunks(chunks, output_subdir, pdf_name, content_metadata)
 
-            # Save metadata
-            self._save_metadata(json_meta, pdf_path, len(elements), len(cleaned_elements), len(chunks))
+            # Save enhanced metadata
+            self._save_metadata(json_meta, pdf_path, len(elements), len(cleaned_elements), len(chunks), content_metadata)
 
             # Final success
             logger.info("Successfully processed %s: %d files created", pdf_name, len(saved_files))
             if self.progress_callback:
-                self.progress_callback("complete", 100, f"Processing complete! Created {len(saved_files)} files.")
+                self.progress_callback("complete", 100, f"Processing complete! Created {len(saved_files)} files as {self.document_type}.")
 
             return saved_files
 
@@ -243,28 +347,50 @@ class PDFProcessor:
                 logging.getLogger().removeHandler(progress_handler)
 
     def _extract_elements_with_fallbacks(self, pdf_path: Path):
-        """Extract elements using multiple strategies with fallbacks."""
-        strategies = [
-            ("hi_res", {
-                "strategy": "hi_res",
-                "infer_table_structure": True,
-                "ocr_languages": "eng" if self.use_ocr else None,
-                "extract_images": False,
-            }),
-            ("auto", {
-                "strategy": "auto",
-                "infer_table_structure": True,
-                "ocr_languages": "eng" if self.use_ocr else None,
-            }),
-            ("fast", {
-                "strategy": "fast",
-                "ocr_languages": "eng" if self.use_ocr else None,
-            })
-        ]
+        """Extract elements using multiple strategies with document type optimization."""
+        # Adjust strategy based on document type
+        if self.document_type == "character_sheet":
+            # Character sheets need table detection but less complex analysis
+            strategies = [
+                ("fast", {
+                    "strategy": "fast",
+                    "ocr_languages": "eng" if self.use_ocr else None,
+                    "infer_table_structure": True,
+                    "include_page_breaks": True,  # ← Add this to help with layout
+                }),
+                ("hi_res", {  # Fallback
+                    "strategy": "hi_res",
+                    "infer_table_structure": False,
+                    "extract_images": False,
+                    "ocr_languages": "eng" if self.use_ocr else None,
+                })
+            ]
+        else:
+            # Rulebooks and universe info need full analysis
+            strategies = [
+                ("auto", {
+                    "strategy": "auto",
+                    "infer_table_structure": True,
+                    "ocr_languages": "eng" if self.use_ocr else None,
+                    "include_page_breaks": True,
+                }),
+                ("fast", {
+                    "strategy": "fast",
+                    "ocr_languages": "eng" if self.use_ocr else None,
+                    "infer_table_structure": True,
+                    "include_page_breaks": True,
+                }),
+                ("hi_res", {
+                    "strategy": "hi_res",
+                    "infer_table_structure": False,
+                    "extract_images": False,
+                    "ocr_languages": "eng" if self.use_ocr else None,
+                })
+            ]
 
         for strategy_name, kwargs in strategies:
             try:
-                logger.info("Trying %s strategy...", strategy_name)
+                logger.info("Trying %s strategy for %s...", strategy_name, self.document_type)
                 elements = partition_pdf(filename=str(pdf_path), **kwargs)
                 logger.info("%s strategy succeeded: %d elements", strategy_name, len(elements))
                 return elements
@@ -276,8 +402,8 @@ class PDFProcessor:
         logger.error("All extraction strategies failed!")
         return []
 
-    def _debug_elements(self, elements, pdf_name):
-        """Analyze and debug elements."""
+    def _debug_elements(self, elements, pdf_name, content_metadata):
+        """Enhanced debug analysis with content metadata."""
         if not self.debug_mode:
             return
 
@@ -295,12 +421,14 @@ class PDFProcessor:
 
         logger.info("Element types: %s", element_types)
 
-        # Save debug info
+        # Save debug info with enhanced metadata
         debug_file = self.debug_dir / f"{pdf_name}_elements_debug.json"
         debug_info = {
             "total_elements": len(elements),
             "element_types": element_types,
             "text_samples": text_samples,
+            "content_metadata": content_metadata,
+            "document_type": self.document_type,
             "first_10_elements": [
                 {
                     "type": type(elem).__name__,
@@ -311,16 +439,22 @@ class PDFProcessor:
         }
 
         debug_file.write_text(json.dumps(debug_info, indent=2, ensure_ascii=False))
-        logger.info("Debug info saved to %s", debug_file)
+        logger.info("Enhanced debug info saved to %s", debug_file)
 
     def _clean_elements(self, elements):
-        """Clean and filter elements."""
+        """Clean and filter elements with document type awareness."""
         cleaned = []
 
         for elem in elements:
             elem_text = str(elem).strip()
             if not elem_text or len(elem_text) < 3:
                 continue
+
+            # More aggressive filtering for character sheets
+            if self.document_type == "character_sheet":
+                # Skip very short fragments that are likely form fields
+                if len(elem_text) < 10 and not any(char.isdigit() for char in elem_text):
+                    continue
 
             # Include most text-bearing elements
             if isinstance(elem, (NarrativeText, Title, ListItem, Text, Table)):
@@ -340,14 +474,21 @@ class PDFProcessor:
         return cleaned
 
     def _create_chunks_with_fallbacks(self, elements):
-        """Create chunks with multiple fallback strategies."""
+        """Create chunks with document type optimization."""
+        # Adjust chunking strategy based on document type
+        if self.document_type == "character_sheet":
+            # Character sheets benefit from smaller, more precise chunks
+            chunk_size = self.chunk_size // 2
+        else:
+            chunk_size = self.chunk_size
+
         # Try 1: chunk_by_title
         try:
-            logger.info("Attempting chunk_by_title...")
+            logger.info("Attempting chunk_by_title with size %d...", chunk_size)
             chunks = chunk_by_title(
                 elements,
-                max_characters=self.chunk_size * 4,
-                overlap=self.chunk_size // 2,
+                max_characters=chunk_size * 4,
+                overlap=chunk_size // 4,
             )
             if chunks:
                 logger.info("chunk_by_title succeeded: %d chunks", len(chunks))
@@ -357,14 +498,14 @@ class PDFProcessor:
 
         # Try 2: Manual chunking fallback
         logger.info("Using manual chunking fallback...")
-        return self._manual_chunk(elements)
+        return self._manual_chunk(elements, chunk_size)
 
-    def _manual_chunk(self, elements):
-        """Size-based chunking fallback."""
+    def _manual_chunk(self, elements, chunk_size):
+        """Size-based chunking fallback with document type awareness."""
         chunks = []
         current_chunk = []
         current_size = 0
-        max_size = self.chunk_size * 4
+        max_size = chunk_size * 4
 
         for elem in elements:
             elem_text = str(elem)
@@ -393,9 +534,12 @@ class PDFProcessor:
         logger.info("Manual chunking created %d chunks", len(chunks))
         return chunks
 
-    def _save_chunks(self, chunks, output_dir, pdf_name):
-        """Save chunks as markdown files."""
+    def _save_chunks(self, chunks, output_dir, pdf_name, content_metadata):
+        """Save chunks as markdown files with enhanced metadata headers."""
         saved_files = {}
+
+        # Create metadata header for all files
+        metadata_header = self._create_metadata_header(pdf_name, content_metadata)
 
         for i, chunk in enumerate(chunks):
             try:
@@ -416,8 +560,8 @@ class PDFProcessor:
                 safe_title = "".join(c for c in first_line if c.isalnum() or c in " _-").strip()[:50]
                 safe_title = safe_title.replace(" ", "_") or f"section_{i+1}"
 
-                # Format content
-                md_content = self._format_chunk_content(chunk, chunk_text, i)
+                # Format content with metadata
+                md_content = self._format_chunk_content(chunk, chunk_text, i, metadata_header)
 
                 # Save with unique filename
                 file_path = output_dir / f"{safe_title}.md"
@@ -435,8 +579,27 @@ class PDFProcessor:
 
         return saved_files
 
-    def _format_chunk_content(self, chunk, chunk_text, index):
-        """Format chunk as markdown."""
+    def _create_metadata_header(self, pdf_name: str, content_metadata: Dict) -> str:
+        """Create YAML front matter for markdown files."""
+        return f"""---
+title: "{pdf_name}"
+document_type: "{content_metadata.get('document_type', 'unknown')}"
+edition: "{content_metadata.get('edition', 'unknown')}"
+primary_focus: "{content_metadata.get('primary_focus', 'general')}"
+detected_sections: {content_metadata.get('detected_sections', [])}
+processed_date: "{time.strftime('%Y-%m-%d %H:%M:%S')}"
+---
+
+"""
+
+    def _format_chunk_content(self, chunk, chunk_text, index, metadata_header):
+        """Format chunk as markdown with metadata header."""
+        content = ""
+
+        # Add metadata header only to first chunk or if requested
+        if index == 0:
+            content += metadata_header
+
         if hasattr(chunk, 'elements'):
             # Process individual elements
             lines = []
@@ -455,9 +618,11 @@ class PDFProcessor:
                 else:
                     lines.append(text)
 
-            return '\n\n'.join(lines) if lines else chunk_text
+            content += '\n\n'.join(lines) if lines else chunk_text
         else:
-            return chunk_text
+            content += chunk_text
+
+        return content
 
     def _estimate_heading_level(self, title_elem):
         """Estimate heading level."""
@@ -475,7 +640,7 @@ class PDFProcessor:
         return 2
 
     def _emergency_fallback(self, pdf_path, output_dir, pdf_name):
-        """Last resort: extract raw text."""
+        """Last resort: extract raw text with document type awareness."""
         try:
             import fitz  # PyMuPDF fallback
             doc = fitz.open(pdf_path)
@@ -485,12 +650,16 @@ class PDFProcessor:
             doc.close()
 
             if text.strip():
+                # Analyze content even in fallback
+                content_metadata = self._detect_shadowrun_content(text, pdf_name)
+                metadata_header = self._create_metadata_header(pdf_name, content_metadata)
+
                 file_path = output_dir / f"{pdf_name}_fallback.md"
-                md_content = f"# {pdf_name}\n\n{text}"
+                md_content = f"{metadata_header}# {pdf_name}\n\n{text}"
                 file_path.write_text(md_content, encoding='utf-8')
-                logger.info("Emergency fallback created: %s", file_path)
+                logger.info("Emergency fallback created with metadata: %s", file_path)
                 if self.progress_callback:
-                    self.progress_callback("complete", 100, "Completed using text extraction fallback")
+                    self.progress_callback("complete", 100, f"Completed using text extraction fallback for {self.document_type}")
                 return {str(file_path): md_content}
         except Exception as e:
             logger.error("Emergency fallback failed: %s", str(e))
@@ -504,13 +673,15 @@ class PDFProcessor:
             for f in output_dir.glob("*.md")
         }
 
-    def _save_metadata(self, json_meta, pdf_path, total_elements, cleaned_elements, chunks):
-        """Save processing metadata."""
+    def _save_metadata(self, json_meta, pdf_path, total_elements, cleaned_elements, chunks, content_metadata):
+        """Save enhanced processing metadata."""
         json_meta.write_text(json.dumps({
             "source": str(pdf_path),
             "processed_at": __import__("datetime").datetime.utcnow().isoformat(),
             "total_elements": total_elements,
             "cleaned_elements": cleaned_elements,
             "chunks_created": chunks,
-            "processor_version": "simplified_v1"
+            "processor_version": "enhanced_v2",
+            "document_type": self.document_type,
+            "content_metadata": content_metadata
         }, indent=2))
