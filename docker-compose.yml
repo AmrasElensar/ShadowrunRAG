@@ -32,6 +32,7 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     container_name: shadowrun-backend
+    runtime: nvidia
     ports:
       - "8000:8000"
     volumes:

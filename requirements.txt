@@ -11,7 +11,6 @@ requests==2.32.4
 # WebSocket Support
 # ===================
 websocket-client==1.6.4        # For Streamlit WebSocket client
-# Note: FastAPI WebSocket support is included in uvicorn[standard]
 
 # ===================
 # PDF & Document Processing
@@ -22,7 +21,7 @@ pytesseract==0.3.13        # OCR engine wrapper
 Pillow>=7.1.0,<11.0.0      # Image processing - compatible with Streamlit
 markdown==3.7             # Markdown parsing
 
-# Unstructured with compatible versions
+# Unstructured with compatible versions (fallback option)
 unstructured[local-inference]==0.18.11
 unstructured[pdf]==0.18.11
 
@@ -43,8 +42,15 @@ langchain-text-splitters==0.3.9  # Required by langchain 0.3.27 (>=0.3.9)
 # Tokenization
 tiktoken==0.8.0
 
-# Embedding backend (if you expand later)
-# sentence-transformers==3.2.1  # Alternative to Ollama embeddings
+# ===================
+# Marker Dependencies (PyTorch installed separately first)
+# ===================
+# Marker PDF processing (GPU-accelerated multi-column extraction)
+marker-pdf==0.2.15
+surya-ocr>=0.4.14          # Marker's OCR component with GPU support
+
+# NOTE: detectron2 installed separately in Dockerfile after PyTorch
+# detectron2 @ git+https://github.com/facebookresearch/detectron2.git
 
 # ===================
 # Utilities
