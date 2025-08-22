@@ -361,10 +361,12 @@ async def query_stream(request: QueryRequest):
         def generate():
             try:
                 # Get search results first
-                search_results = retriever.search(
+                search_results = retriever.search_with_linked_chunks(
                     question=request.question,
                     n_results=request.n_results,
-                    where_filter=final_filter
+                    where_filter=final_filter,
+                    character_role=request.character_role,
+                    fetch_linked=True  # or make this configurable
                 )
 
                 if not search_results['documents']:

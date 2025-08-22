@@ -36,7 +36,7 @@ class IncrementalIndexer:
         chroma_path: str = "data/chroma_db",
         collection_name: str = "shadowrun_docs",
         embedding_model: str = "nomic-embed-text",
-        chunk_size: int = 1024,           # Increased from 512 for better performance
+        chunk_size: int = 2024,           # Increased from 512 for better performance
         chunk_overlap: int = 150,         # Increased proportionally
         use_semantic_splitting: bool = True
     ):
@@ -87,23 +87,37 @@ class IncrementalIndexer:
         return hashlib.md5(file_path.read_bytes()).hexdigest()
 
     def _extract_shadowrun_metadata(self, content: str, source: str) -> Dict:
-        """Extract Shadowrun-specific metadata from content."""
+        """Extract Shadowrun-specific metadata from content with enhanced fields."""
         metadata = {
             "source": source,
             "document_type": "unknown",
             "edition": "unknown",
             "main_section": "General",
-            "subsection": "General"
+            "subsection": "General",
+            # NEW: Enhanced fields for chunking
+            "section_id": None,
+            "section_title": None,
+            "chunk_index": None,
+            "total_chunks_in_section": None,
+            "section_complete": None,
+            "prev_chunk_global": None,
+            "next_chunk_global": None,
+            "prev_chunk_section": None,
+            "next_chunk_section": None,
+            "chunk_id": None,
+            "continuation_of": None,
+            "token_count": None
         }
 
-        # Detect document type from filename and content
+        # Existing detection logic stays the same...
         filename = Path(source).name.lower()
-        content_lower = content[:2000].lower()  # Check first 2000 chars
+        content_lower = content[:2000].lower()
 
-        # Document type detection
+        # Document type detection (existing code)
         if any(term in filename for term in ["character", "sheet", "pc", "npc"]):
             metadata["document_type"] = "character_sheet"
-        elif any(term in content_lower for term in ["character creation", "priority system", "attribute", "skill points"]):
+        elif any(term in content_lower for term in
+                 ["character creation", "priority system", "attribute", "skill points"]):
             metadata["document_type"] = "character_sheet"
         elif any(term in filename for term in ["core", "rulebook", "rules", "manual"]):
             metadata["document_type"] = "rulebook"
@@ -112,7 +126,7 @@ class IncrementalIndexer:
         else:
             metadata["document_type"] = "universe_info"
 
-        # Edition detection
+        # Edition detection (existing code)
         if "shadowrun 6" in content_lower or "6th edition" in content_lower or "sr6" in content_lower:
             metadata["edition"] = "SR6"
         elif "shadowrun 5" in content_lower or "5th edition" in content_lower or "sr5" in content_lower:
@@ -122,14 +136,15 @@ class IncrementalIndexer:
         elif "shadowrun 3" in content_lower or "3rd edition" in content_lower or "sr3" in content_lower:
             metadata["edition"] = "SR3"
 
-        # Main section detection (more comprehensive)
+        # Section detection (existing code - now serves as fallback)
         section_keywords = {
             "Combat": ["combat", "initiative", "damage", "armor", "weapon", "attack", "defense", "wound"],
             "Magic": ["magic", "spell", "astral", "summoning", "enchanting", "adept", "mage", "spirit"],
             "Matrix": ["matrix", "hacking", "cyberdeck", "programs", "ic", "host", "decker", "technomancer"],
             "Riggers": ["rigger", "drone", "vehicle", "pilot", "autosofts", "jumped in"],
             "Gear": ["gear", "equipment", "cyberware", "bioware", "weapons", "armor", "electronics"],
-            "Character Creation": ["character creation", "priority", "attributes", "skills", "metatype", "build points"],
+            "Character Creation": ["character creation", "priority", "attributes", "skills", "metatype",
+                                   "build points"],
             "Gamemaster": ["gamemaster", "gm", "adventure", "npc", "campaign", "plot", "scenario"],
             "Setting": ["seattle", "sixth world", "corporations", "shadowrun", "awakening", "crash"]
         }
@@ -142,88 +157,219 @@ class IncrementalIndexer:
         return metadata
 
     def _chunk_text_semantic(self, text: str, source: str) -> List[Dict]:
-        """Split text using Markdown headers with consistent token-based sizing and enhanced metadata."""
+        """Simplified semantic chunking: Split by # boundaries, simple paragraph fallback."""
         if not self.use_semantic_splitting:
             return self._chunk_text_simple(text, source)
 
         # Extract base metadata for all chunks
         base_metadata = self._extract_shadowrun_metadata(text, source)
 
-        headers_to_split_on = [
-            ("#", "Section"),
-            ("##", "Subsection"),
-            ("###", "Subsubsection"),
-        ]
+        # Split by single # headers (major sections)
+        main_sections = self._split_by_main_headers(text)
 
-        # First: split by headers
-        markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on)
-        try:
-            header_chunks = markdown_splitter.split_text(text)
-        except Exception as e:
-            logger.warning(f"Header splitting failed: {e}. Falling back to simple chunking.")
+        if not main_sections:
+            # Fallback to simple chunking if no headers found
+            logger.warning(f"No main headers found in {source}, using simple chunking")
             return self._chunk_text_simple(text, source)
 
-        # Second: split large chunks by token/word count
         final_chunks = []
 
-        if TIKTOKEN_AVAILABLE:
-            # Use tiktoken-aware splitter
-            splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-                chunk_size=self.chunk_size,
-                chunk_overlap=self.chunk_overlap,
-                encoding_name="cl100k_base"
-            )
-        else:
-            # Use character-based splitter with word approximation
-            # Rough conversion: 1 token ≈ 4 characters
-            char_chunk_size = self.chunk_size * 4
-            char_overlap = self.chunk_overlap * 4
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=char_chunk_size,
-                chunk_overlap=char_overlap,
-                length_function=len
-            )
+        for section_data in main_sections:
+            section_title = section_data['title']
+            section_content = section_data['content']
+            section_id = self._generate_section_id(section_title)
 
-        for chunk in header_chunks:
-            content = chunk.page_content
-            chunk_metadata = chunk.metadata
-            token_count = self._count_tokens(content)
+            # Check if section fits in one chunk (2048 tokens)
+            token_count = self._count_tokens(section_content)
 
-            # Merge base metadata with chunk-specific metadata
-            enhanced_metadata = {**base_metadata}
+            if token_count <= 2048:
+                # Single chunk for this section
+                chunk_metadata = {
+                    **base_metadata,
+                    "section_id": section_id,
+                    "section_title": section_title,
+                    "chunk_index": 0,
+                    "total_chunks_in_section": 1,
+                    "section_complete": True,
+                    "token_count": token_count
+                }
 
-            # Update section info from headers if available
-            if chunk_metadata.get("Section"):
-                enhanced_metadata["main_section"] = chunk_metadata["Section"]
-            if chunk_metadata.get("Subsection"):
-                enhanced_metadata["subsection"] = chunk_metadata["Subsection"]
-            elif chunk_metadata.get("Subsubsection"):
-                enhanced_metadata["subsection"] = chunk_metadata["Subsubsection"]
-
-            if token_count > self.chunk_size:
-                # Split further
-                split_docs = splitter.split_text(content)
-                for i, doc in enumerate(split_docs):
-                    final_chunks.append({
-                        "text": doc,
-                        "source": source,
-                        "metadata": {
-                            **enhanced_metadata,
-                            "chunk_part": i,
-                            "token_count": self._count_tokens(doc)
-                        }
-                    })
-            else:
                 final_chunks.append({
-                    "text": content,
+                    "text": section_content,
                     "source": source,
-                    "metadata": {
-                        **enhanced_metadata,
-                        "token_count": token_count
-                    }
+                    "metadata": chunk_metadata
                 })
 
+            else:
+                # Split large section with simple paragraph splitting
+                sub_chunks = self._split_large_section_simple(
+                    section_content, section_title, section_id, base_metadata, source
+                )
+                final_chunks.extend(sub_chunks)
+
+        # Add prev/next chunk linking across all chunks
+        self._add_sequential_links(final_chunks)
+
+        logger.info(f"Created {len(final_chunks)} chunks from {len(main_sections)} main sections")
         return final_chunks
+
+    def _split_by_main_headers(self, text: str) -> List[Dict]:
+        """Split text by main headers (# ), preserving all content."""
+        lines = text.split('\n')
+        sections = []
+        current_content = []
+        current_title = "Introduction"  # Default for content before first header
+
+        for line in lines:
+            # Check for main header (single # at start of line, not ## or ###)
+            if line.strip().startswith('# ') and not line.strip().startswith('##'):
+                # Save previous section if it has content
+                if current_content:
+                    sections.append({
+                        'title': current_title,
+                        'content': '\n'.join(current_content).strip()
+                    })
+
+                # Start new section
+                current_title = line.strip()[2:].strip()  # Remove '# '
+                current_content = [line]  # Include the header line itself
+
+            else:
+                # Add all lines to current section
+                current_content.append(line)
+
+        # Add the final section
+        if current_content:
+            sections.append({
+                'title': current_title,
+                'content': '\n'.join(current_content).strip()
+            })
+
+        # Filter out empty sections
+        sections = [s for s in sections if s['content'].strip()]
+
+        logger.info(f"Split document into {len(sections)} sections:")
+        for i, section in enumerate(sections):
+            token_count = self._count_tokens(section['content'])
+            logger.info(f"  {i + 1}. '{section['title']}': {token_count} tokens")
+
+        return sections
+
+    def _split_large_section_simple(self, content: str, section_title: str, section_id: str,
+                                    base_metadata: Dict, source: str) -> List[Dict]:
+        """Split a large section into smaller chunks using simple paragraph splitting."""
+
+        # Simple paragraph-based splitting
+        paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+
+        if not paragraphs:
+            # Emergency: just split by sentences
+            sentences = [s.strip() for s in content.split('.') if s.strip()]
+            paragraphs = sentences
+
+        chunks = []
+        current_chunk = []
+        current_tokens = 0
+        max_tokens = 2048
+
+        for paragraph in paragraphs:
+            para_tokens = self._count_tokens(paragraph)
+
+            # If adding this paragraph would exceed limit, finalize current chunk
+            if current_tokens + para_tokens > max_tokens and current_chunk:
+                # Save current chunk
+                chunk_content = '\n\n'.join(current_chunk)
+                chunks.append(chunk_content)
+
+                # Start new chunk
+                current_chunk = [paragraph]
+                current_tokens = para_tokens
+            else:
+                # Add to current chunk
+                current_chunk.append(paragraph)
+                current_tokens += para_tokens
+
+        # Don't forget the last chunk
+        if current_chunk:
+            chunk_content = '\n\n'.join(current_chunk)
+            chunks.append(chunk_content)
+
+        # Convert to chunk objects with metadata
+        chunk_objects = []
+        total_parts = len(chunks)
+
+        for i, chunk_content in enumerate(chunks):
+            chunk_metadata = {
+                **base_metadata,
+                "section_id": section_id,
+                "section_title": section_title,
+                "chunk_index": i,
+                "total_chunks_in_section": total_parts,
+                "section_complete": False,  # Multi-part section
+                "continuation_of": section_id if i > 0 else None,
+                "token_count": self._count_tokens(chunk_content)
+            }
+
+            chunk_objects.append({
+                "text": chunk_content,
+                "source": source,
+                "metadata": chunk_metadata
+            })
+
+        logger.info(f"Split large section '{section_title}' into {total_parts} chunks")
+        return chunk_objects
+
+    def _generate_section_id(self, section_title: str) -> str:
+        """Generate clean section ID from title."""
+        import re
+        # Remove special characters, keep alphanumeric and spaces
+        clean_title = re.sub(r'[^a-zA-Z0-9\s]', '', section_title)
+        # Replace spaces with underscores, limit length
+        clean_title = re.sub(r'\s+', '_', clean_title.strip())
+        return clean_title.lower()[:50]
+
+    def _add_sequential_links(self, chunks: List[Dict]) -> None:
+        """Add prev_chunk/next_chunk links to all chunks."""
+
+        for i, chunk in enumerate(chunks):
+            metadata = chunk['metadata']
+
+            # Add global chunk linking (across all chunks in document)
+            if i > 0:
+                metadata['prev_chunk_global'] = f"chunk_{i - 1:03d}"
+            if i < len(chunks) - 1:
+                metadata['next_chunk_global'] = f"chunk_{i + 1:03d}"
+
+            # Add section-specific linking (within same section)
+            section_id = metadata.get('section_id')
+            if section_id:
+                # Find other chunks in same section
+                section_chunks = [
+                    (j, c) for j, c in enumerate(chunks)
+                    if c['metadata'].get('section_id') == section_id
+                ]
+
+                # Find current chunk's position within its section
+                section_position = None
+                for pos, (chunk_idx, _) in enumerate(section_chunks):
+                    if chunk_idx == i:
+                        section_position = pos
+                        break
+
+                if section_position is not None:
+                    # Add section-specific prev/next links
+                    if section_position > 0:
+                        prev_global_idx = section_chunks[section_position - 1][0]
+                        metadata['prev_chunk_section'] = f"chunk_{prev_global_idx:03d}"
+
+                    if section_position < len(section_chunks) - 1:
+                        next_global_idx = section_chunks[section_position + 1][0]
+                        metadata['next_chunk_section'] = f"chunk_{next_global_idx:03d}"
+
+            # Add a unique chunk ID for reference
+            metadata['chunk_id'] = f"chunk_{i:03d}"
+
+        logger.info(f"Added sequential links to {len(chunks)} chunks")
 
     def _chunk_text_simple(self, text: str, source: str) -> List[Dict]:
         """Simple word/token-based chunking fallback with enhanced metadata."""
@@ -282,7 +428,7 @@ class IncrementalIndexer:
         return embeddings
 
     def index_directory(self, directory: str, force_reindex: bool = False):
-        """Index all markdown files in a directory."""
+        """Index all markdown files in a directory with enhanced metadata support."""
         directory = Path(directory)
         md_files = list(directory.rglob("*.md"))
 
@@ -291,7 +437,8 @@ class IncrementalIndexer:
             file_hash = self._get_file_hash(file_path)
             relative_path = str(file_path.relative_to(directory))
 
-            if force_reindex or relative_path not in self.indexed_files or self.indexed_files[relative_path] != file_hash:
+            if force_reindex or relative_path not in self.indexed_files or self.indexed_files[
+                relative_path] != file_hash:
                 files_to_index.append(file_path)
                 self.indexed_files[relative_path] = file_hash
 
@@ -299,7 +446,7 @@ class IncrementalIndexer:
             logger.info("No new or changed files to index")
             return
 
-        logger.info(f"Indexing {len(files_to_index)} files with enhanced metadata...")
+        logger.info(f"Indexing {len(files_to_index)} files with enhanced sequential metadata...")
         all_chunks = []
 
         for file_path in files_to_index:
@@ -314,7 +461,7 @@ class IncrementalIndexer:
             ids = [f"{hashlib.md5(chunk['text'].encode()).hexdigest()[:16]}" for chunk in all_chunks]
             metadatas = [chunk['metadata'] for chunk in all_chunks]
 
-            # Avoid ID collisions
+            # Avoid ID collisions (existing code)
             seen_ids = set()
             for i, id_ in enumerate(ids):
                 original = id_
@@ -325,29 +472,78 @@ class IncrementalIndexer:
                 ids[i] = id_
                 seen_ids.add(id_)
 
+            cleaned_metadatas = self._clean_metadata_for_chromadb(metadatas)
+
             self.collection.add(
                 ids=ids,
                 embeddings=embeddings,
                 documents=texts,
-                metadatas=metadatas
+                metadatas=cleaned_metadatas  # ✅ No None values
             )
 
-            logger.info(f"Added {len(all_chunks)} chunks to index with enhanced metadata")
+            logger.info(f"Added {len(all_chunks)} chunks to index with enhanced sequential metadata")
 
-            # Log metadata distribution for debugging
+            # Enhanced metadata distribution logging
             doc_types = {}
             editions = {}
             sections = {}
+            chunk_links = 0
+            section_distribution = {}
+
             for meta in metadatas:
-                doc_types[meta.get('document_type', 'unknown')] = doc_types.get(meta.get('document_type', 'unknown'), 0) + 1
+                # Existing logging
+                doc_types[meta.get('document_type', 'unknown')] = doc_types.get(meta.get('document_type', 'unknown'),
+                                                                                0) + 1
                 editions[meta.get('edition', 'unknown')] = editions.get(meta.get('edition', 'unknown'), 0) + 1
                 sections[meta.get('main_section', 'unknown')] = sections.get(meta.get('main_section', 'unknown'), 0) + 1
+
+                # NEW: Enhanced logging
+                if meta.get('next_chunk_global') or meta.get('prev_chunk_global'):
+                    chunk_links += 1
+
+                section_id = meta.get('section_id')
+                if section_id:
+                    section_distribution[section_id] = section_distribution.get(section_id, 0) + 1
 
             logger.info(f"Document types: {doc_types}")
             logger.info(f"Editions: {editions}")
             logger.info(f"Sections: {sections}")
-        
+            logger.info(f"Chunks with sequential links: {chunk_links}/{len(metadatas)}")
+            logger.info(f"Section distribution: {len(section_distribution)} unique sections")
+
+            # Log example section for debugging
+            if section_distribution:
+                example_section = list(section_distribution.keys())[0]
+                example_count = section_distribution[example_section]
+                logger.info(f"Example: Section '{example_section}' has {example_count} chunks")
+
         self._save_index_metadata()
+
+    def _clean_metadata_for_chromadb(self, metadatas: List[Dict]) -> List[Dict]:
+        """Clean metadata to remove None values and ensure ChromaDB compatibility."""
+        cleaned_metadatas = []
+
+        for metadata in metadatas:
+            cleaned = {}
+
+            for key, value in metadata.items():
+                # Skip None values entirely
+                if value is None:
+                    continue
+
+                # Ensure all values are basic types (str, int, float, bool)
+                if isinstance(value, (str, int, float, bool)):
+                    cleaned[key] = value
+                elif isinstance(value, list):
+                    # Convert lists to comma-separated strings
+                    cleaned[key] = ",".join(str(item) for item in value if item is not None)
+                else:
+                    # Convert other types to string
+                    cleaned[key] = str(value)
+
+            cleaned_metadatas.append(cleaned)
+
+        return cleaned_metadatas
     
     def remove_document(self, file_path: str):
         """Remove a document from the index."""

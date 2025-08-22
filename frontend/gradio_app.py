@@ -234,6 +234,11 @@ class RAGClient:
 # Initialize client
 client = RAGClient()
 
+# Global variables for pagination and state
+search_file_paths = {}
+current_search_params = {}
+current_page = 1
+
 # ===== UPLOAD TAB FUNCTIONS =====
 
 def process_uploads(files, document_type: str) -> str:
@@ -397,11 +402,11 @@ def refresh_documents():
 
     if "error" in stats:
         return f"Error loading stats: {stats['error']}", {}, pd.DataFrame(), "", gr.update(choices=[]), gr.update(
-            choices=[]), gr.update(choices=[])
+            choices=[]), gr.update(choices=[]), gr.update(choices=[])
 
     if not docs:
         return "No documents indexed yet", {}, pd.DataFrame(), "", gr.update(choices=[]), gr.update(
-            choices=[]), gr.update(choices=[])
+            choices=[]), gr.update(choices=[]), gr.update(choices=[])
 
     # Group documents by parent directory
     doc_groups = {}
@@ -483,7 +488,8 @@ def refresh_documents():
         stats_text,
         gr.update(choices=group_choices),
         gr.update(choices=type_choices),
-        gr.update(choices=edition_choices)
+        gr.update(choices=edition_choices),
+        gr.update(choices=group_choices)
     )
 
 
@@ -517,12 +523,28 @@ def handle_library_file_selection(selected_file, group_name, doc_groups):
 
 
 def search_docs_fn(query: str, selected_group: str, selected_type: str, selected_edition: str, page: int = 1):
-    """Enhanced document search with metadata filtering."""
-    global search_file_paths
+    """Enhanced document search with metadata filtering and pagination."""
+    global search_file_paths, current_search_params, current_page
+
+    # Store search parameters for pagination
+    current_search_params = {
+        "query": query,
+        "selected_group": selected_group,
+        "selected_type": selected_type,
+        "selected_edition": selected_edition
+    }
+    current_page = page
+
     search_file_paths = {}
 
     if not query.strip():
-        return "Enter a search query to find documents", gr.update(choices=[], visible=False), ""
+        return (
+            "Enter a search query to find documents",
+            gr.update(choices=[], visible=False),
+            "",
+            gr.update(visible=False),
+            gr.update(value="Page 0 of 0")
+        )
 
     group_filter = None if selected_group == "All Groups" else selected_group
     type_filter = None if selected_type == "All Types" else selected_type
@@ -533,19 +555,30 @@ def search_docs_fn(query: str, selected_group: str, selected_type: str, selected
     )
 
     if "error" in results:
-        return f"Search error: {results['error']}", gr.update(choices=[], visible=False), ""
+        return (
+            f"Search error: {results['error']}",
+            gr.update(choices=[], visible=False),
+            "",
+            gr.update(visible=False),
+            gr.update(value="Page 0 of 0")
+        )
 
     files = results.get("results", [])
     total = results.get("total", 0)
-    current_page = results.get("page", 1)
+    current_page_num = results.get("page", 1)
     total_pages = results.get("total_pages", 1)
 
     if not files:
-        return "No files found matching your search", gr.update(choices=[], visible=False), ""
+        return (
+            "No files found matching your search",
+            gr.update(choices=[], visible=False),
+            "",
+            gr.update(visible=False),
+            gr.update(value="Page 0 of 0")
+        )
 
     # Create choices for radio buttons and store file paths
     choices = []
-
     for file_info in files:
         match_type = file_info.get("match_type", "")
         match_indicator = {"filename": "📝", "content": "🔍", "all": "📄"}.get(match_type, "📄")
@@ -564,12 +597,40 @@ def search_docs_fn(query: str, selected_group: str, selected_type: str, selected
         filter_info.append(f"Edition: {edition_filter}")
 
     filter_text = f" | Filters: {', '.join(filter_info)}" if filter_info else ""
-    summary_text = f"**Found {total} files** (Page {current_page}/{total_pages}){filter_text} - Click to view:"
+    summary_text = f"**Found {total} files**{filter_text} - Click to view:"
 
     # Auto-load first result
     first_content = load_document_content(files[0]['file_path'])
 
-    return summary_text, gr.update(choices=choices, visible=True, value=choices[0]), first_content
+    # Update pagination info
+    page_text = f"Page {current_page_num} of {total_pages}"
+    pagination_visible = total_pages > 1
+
+    return (
+        summary_text,
+        gr.update(choices=choices, visible=True, value=choices[0]),
+        first_content,
+        gr.update(visible=pagination_visible),
+        gr.update(value=page_text)
+    )
+
+
+def navigate_search_results(direction: int):
+    """Navigate search results pagination."""
+    global current_search_params, current_page
+
+    if not current_search_params:
+        return search_docs_fn("", "All Groups", "All Types", "All Editions", 1)
+
+    new_page = max(1, current_page + direction)
+
+    return search_docs_fn(
+        current_search_params["query"],
+        current_search_params["selected_group"],
+        current_search_params["selected_type"],
+        current_search_params["selected_edition"],
+        new_page
+    )
 
 
 def handle_file_selection(selected_choice):
@@ -581,10 +642,6 @@ def handle_file_selection(selected_choice):
 
     file_path = search_file_paths[selected_choice]
     return load_document_content(file_path)
-
-
-# Global variable to store file paths
-search_file_paths = {}
 
 
 def load_document_content(file_path: str):
@@ -790,9 +847,11 @@ def build_interface():
                             interactive=False
                         )
 
-                        progress_display = gr.Number(
-                            label="Overall Progress (%)",
+                        progress_display = gr.Slider(
+                            minimum=0,
+                            maximum=100,
                             value=0,
+                            label="Overall Progress (%)",
                             interactive=False,
                             visible=False
                         )
@@ -854,7 +913,6 @@ def build_interface():
                         )
 
                         # Enhanced auto-refresh timer
-
                 def auto_refresh_progress(enable):
                     if enable:
                         return poll_progress()
@@ -874,44 +932,51 @@ def build_interface():
             # ===== ENHANCED DOCUMENTS TAB =====
             with gr.Tab("📚 Documents"):
                 with gr.Row():
-                    # Left Panel - Enhanced Search & Library
-                    with gr.Column(scale=1):
+                    # Left Panel - Enhanced Search & Library (40% width)
+                    with gr.Column(scale=40):
                         refresh_docs_btn = gr.Button("🔄 Refresh Document Library")
 
                         # Enhanced Search Results Accordion
                         with gr.Accordion("🔍 Enhanced Document Search", open=True):
-                            with gr.Row():
-                                search_query = gr.Textbox(
-                                    label="Search Query",
-                                    placeholder="Search filenames and content...",
-                                    scale=2
-                                )
+                            search_query = gr.Textbox(
+                                label="Search Query",
+                                placeholder="Search filenames and content...",
+                                lines=1
+                            )
 
                             with gr.Row():
                                 group_filter = gr.Dropdown(
-                                    label="Filter by Group",
+                                    label="Group",
                                     choices=["All Groups"],
                                     value="All Groups",
                                     scale=1
                                 )
                                 type_filter = gr.Dropdown(
-                                    label="Filter by Type",
+                                    label="Type",
                                     choices=["All Types"],
                                     value="All Types",
                                     scale=1
                                 )
-                                edition_filter = gr.Dropdown(
-                                    label="Filter by Edition",
-                                    choices=["All Editions"],
-                                    value="All Editions",
-                                    scale=1
-                                )
+
+                            edition_filter = gr.Dropdown(
+                                label="Edition",
+                                choices=["All Editions"],
+                                value="All Editions"
+                            )
 
                             search_btn = gr.Button("🔍 Search", variant="primary")
 
+                            # Search results with pagination
                             search_summary = gr.Markdown(
                                 value="Enter a search query to find documents"
                             )
+
+                            # Pagination controls
+                            with gr.Row(visible=False) as pagination_row:
+                                prev_btn = gr.Button("◀ Previous", size="sm", scale=1)
+                                page_info = gr.Markdown("Page 1 of 1")
+                                next_btn = gr.Button("Next ▶", size="sm", scale=1)
+
                             file_selector = gr.Radio(
                                 label="Select File",
                                 choices=[],
@@ -948,14 +1013,14 @@ def build_interface():
                                 datatype=["str", "number"]
                             )
 
-                    # Right Panel - Enhanced Document Viewer
-                    with gr.Column(scale=1):
+                    # Right Panel - Enhanced Document Viewer (60% width)
+                    with gr.Column(scale=60):
                         with gr.Group():
                             gr.Markdown("### 📖 Enhanced Document Viewer")
                             document_content = gr.Markdown(
                                 value="🔍 Search for documents or browse the library to view content with metadata",
                                 label="Content",
-                                elem_classes=["document-viewer"]
+                                show_label=False
                             )
 
                 # Wire up enhanced functionality
@@ -963,14 +1028,25 @@ def build_interface():
                     fn=refresh_documents,
                     outputs=[
                         library_summary, doc_groups_state, stats_table, stats_display,
-                        group_filter, type_filter, edition_filter
+                        group_filter, type_filter, edition_filter, group_selector
                     ]
                 )
 
                 search_btn.click(
                     fn=search_docs_fn,
                     inputs=[search_query, group_filter, type_filter, edition_filter],
-                    outputs=[search_summary, file_selector, document_content]
+                    outputs=[search_summary, file_selector, document_content, pagination_row, page_info]
+                )
+
+                # Pagination navigation
+                prev_btn.click(
+                    fn=lambda: navigate_search_results(-1),
+                    outputs=[search_summary, file_selector, document_content, pagination_row, page_info]
+                )
+
+                next_btn.click(
+                    fn=lambda: navigate_search_results(1),
+                    outputs=[search_summary, file_selector, document_content, pagination_row, page_info]
                 )
 
                 file_selector.change(
@@ -998,12 +1074,8 @@ def build_interface():
                     fn=refresh_documents,
                     outputs=[
                         library_summary, doc_groups_state, stats_table, stats_display,
-                        group_filter, type_filter, edition_filter
+                        group_filter, type_filter, edition_filter, group_selector
                     ]
-                ).then(
-                    fn=lambda doc_groups: gr.update(choices=list(doc_groups.keys()) if doc_groups else []),
-                    inputs=[doc_groups_state],
-                    outputs=[group_selector]
                 )
 
             # ===== SESSION NOTES TAB =====
@@ -1036,7 +1108,7 @@ def build_interface():
             elem_classes=["footer"]
         )
 
-        # Enhanced Custom CSS with thinking indicator
+        # Enhanced Custom CSS with better document viewer
         gr.HTML("""
         <style>
         .prose {
@@ -1050,14 +1122,20 @@ def build_interface():
             margin: 0.5rem 0 !important; 
             border-radius: 8px !important;
         }
-        .document-viewer { 
-            padding: 1rem !important; 
-            max-height: 600px !important;
-            overflow-y: auto !important;
-        }
+        
+        /* Enhanced document viewer - remove nested scrolling */
         .gradio-markdown { 
-            padding: 0.75rem !important; 
+            padding: 0.75rem !important;
+            overflow: visible !important;
+            height: auto !important;
+            max-height: none !important;
         }
+        
+        /* Improve container heights for document viewer */
+        .gradio-column:has(.gradio-markdown) {
+            min-height: 70vh !important;
+        }
+        
         .gradio-dataframe { 
             margin: 0.5rem 0 !important; 
         }
@@ -1083,6 +1161,15 @@ def build_interface():
         .doc-type-character { border-left: 3px solid #2196F3; }
         .doc-type-universe { border-left: 3px solid #FF9800; }
         .doc-type-adventure { border-left: 3px solid #9C27B0; }
+        
+        /* Pagination styling */
+        .pagination-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            margin: 0.5rem 0;
+        }
         </style>
         """)
     return app

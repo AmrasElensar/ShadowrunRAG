@@ -757,72 +757,37 @@ class EnhancedPDFProcessor:
 
         return metadata
 
-    def _create_simple_chunks(self, text: str, chunk_size: int = None) -> List[str]:
-        """Create semantic chunks optimized for Shadowrun content."""
-        if chunk_size is None:
-            chunk_size = self.chunk_size
+    def _save_single_file(self, full_text: str, output_dir: Path, pdf_name: str, content_metadata: Dict) -> Dict[
+        str, str]:
+        """Save the complete extracted text as a single markdown file for indexer chunking."""
 
-        # Target characters (rough estimate: 1 token ≈ 4 characters)
-        target_chars = chunk_size * 4
+        # Create enhanced metadata header
+        metadata_header = self._create_enhanced_metadata_header(pdf_name, content_metadata)
 
-        # Split by markdown headers first to preserve structure
-        header_pattern = r'\n(#{1,6}\s+.+?)(?=\n)'
-        sections = re.split(header_pattern, text)
+        # Combine metadata + full text
+        md_content = f"{metadata_header}\n\n{full_text}"
 
-        chunks = []
-        current_chunk = ""
+        # Save as single file named after the PDF
+        safe_filename = "".join(c for c in pdf_name if c.isalnum() or c in " _-").strip()
+        safe_filename = safe_filename.replace(" ", "_") or "document"
 
-        for i, section in enumerate(sections):
-            section = section.strip()
-            if not section:
-                continue
+        file_path = output_dir / f"{safe_filename}.md"
 
-            # If this section would make chunk too large, finalize current chunk
-            if len(current_chunk) + len(section) > target_chars and current_chunk:
-                chunks.append(current_chunk.strip())
-                current_chunk = section
-            else:
-                # Add to current chunk
-                if current_chunk:
-                    current_chunk += "\n\n" + section
-                else:
-                    current_chunk = section
+        # Ensure unique filename if somehow conflicts
+        counter = 1
+        while file_path.exists():
+            file_path = output_dir / f"{safe_filename}_{counter:02d}.md"
+            counter += 1
 
-        # Add final chunk
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
+        # Save the file
+        file_path.write_text(md_content, encoding='utf-8')
 
-        # If no chunks created or chunks too large, fallback to paragraph-based
-        if not chunks or any(len(chunk) > target_chars * 2 for chunk in chunks):
-            chunks = self._create_paragraph_chunks(text, target_chars)
+        logger.info(f"💾 Saved single file: {file_path.name} ({len(full_text)} chars)")
 
-        logger.info(f"Created {len(chunks)} chunks from {len(text)} characters")
-        return chunks
-
-    def _create_paragraph_chunks(self, text: str, target_chars: int) -> List[str]:
-        """Fallback chunking by paragraphs when header-based fails."""
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-        chunks = []
-        current_chunk = ""
-
-        for paragraph in paragraphs:
-            if len(current_chunk) + len(paragraph) > target_chars and current_chunk:
-                chunks.append(current_chunk.strip())
-                current_chunk = paragraph
-            else:
-                if current_chunk:
-                    current_chunk += "\n\n" + paragraph
-                else:
-                    current_chunk = paragraph
-
-        # Add final chunk
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-
-        return chunks if chunks else [text]  # Emergency: return full text as single chunk
+        return {str(file_path): md_content}
 
     def process_pdf(self, pdf_path: str, force_reparse: bool = False) -> Dict[str, str]:
-        """Main processing method: Enhanced PDF extraction with 4-tier hierarchy and NEW Marker API."""
+        """Main processing method: Enhanced PDF extraction - OUTPUT SINGLE FILE for indexer chunking."""
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
@@ -837,7 +802,7 @@ class EnhancedPDFProcessor:
             logger.info(f"⏭️ Skipping {pdf_name} (already processed with enhanced pipeline)")
             return self._load_existing_files(output_subdir)
 
-        logger.info(f"🚀 Processing {pdf_path} as {self.document_type} with enhanced 4-tier extraction (NEW Marker API)")
+        logger.info(f"🚀 Processing {pdf_path} as {self.document_type} - SINGLE FILE OUTPUT for indexer chunking")
 
         # Set up progress tracking
         progress_handler = None
@@ -872,32 +837,22 @@ class EnhancedPDFProcessor:
             logger.info(
                 f"📊 Detected: {content_metadata['document_type']} | {content_metadata['edition']} | {content_metadata['primary_focus']}")
 
-            # STAGE 3: Semantic chunking
+            # STAGE 3: Save SINGLE markdown file (NO CHUNKING HERE)
             if self.progress_callback:
-                self.progress_callback("chunking", 75, "Creating semantic chunks optimized for RAG...")
+                self.progress_callback("saving", 90, "Saving single markdown file for indexer chunking...")
 
-            chunks = self._create_simple_chunks(full_text)
+            saved_files = self._save_single_file(full_text, output_subdir, pdf_name, content_metadata)
 
-            if not chunks:
-                logger.warning("⚠️ No chunks created, using full text")
-                chunks = [full_text]
-
-            # STAGE 4: Save enhanced markdown files
-            if self.progress_callback:
-                self.progress_callback("saving", 90, "Saving enhanced markdown files...")
-
-            saved_files = self._save_enhanced_chunks(chunks, output_subdir, pdf_name, content_metadata)
-
-            # STAGE 5: Save comprehensive metadata
-            self._save_enhanced_metadata(json_meta, pdf_path, len(chunks), content_metadata, extraction_time)
+            # STAGE 4: Save comprehensive metadata
+            self._save_enhanced_metadata(json_meta, pdf_path, 1, content_metadata, extraction_time)  # 1 file created
 
             # Final success
             total_time = time.time() - processing_start
-            logger.info(f"🎉 Successfully processed {pdf_name} in {total_time:.1f}s: {len(saved_files)} files created")
+            logger.info(f"🎉 Successfully processed {pdf_name} in {total_time:.1f}s: 1 file created for indexer")
 
             if self.progress_callback:
                 self.progress_callback("complete", 100,
-                                       f"Enhanced processing complete! Created {len(saved_files)} files in {total_time:.1f}s")
+                                       f"Enhanced processing complete! Created 1 file in {total_time:.1f}s - indexer will handle chunking")
 
             return saved_files
 
@@ -916,70 +871,6 @@ class EnhancedPDFProcessor:
                 logging.getLogger().removeHandler(progress_handler)
             # Clear GPU cache if we used it
             self._clear_gpu_cache()
-
-    def _save_enhanced_chunks(self, chunks: List[str], output_dir: Path, pdf_name: str, content_metadata: Dict) -> Dict[
-        str, str]:
-        """Save chunks as enhanced markdown files with rich metadata."""
-        saved_files = {}
-        metadata_header = self._create_enhanced_metadata_header(pdf_name, content_metadata)
-
-        for i, chunk_text in enumerate(chunks):
-            if not chunk_text.strip():
-                continue
-
-            try:
-                # Generate intelligent title from chunk content
-                title = self._extract_chunk_title(chunk_text, i)
-
-                # Clean filename (safe for filesystem)
-                safe_title = "".join(c for c in title if c.isalnum() or c in " _-").strip()[:50]
-                safe_title = safe_title.replace(" ", "_") or f"chunk_{i + 1:03d}"
-
-                # Format with enhanced metadata
-                md_content = f"{metadata_header}\n\n{chunk_text}"
-
-                # Save with unique filename
-                file_path = output_dir / f"{safe_title}.md"
-                counter = 1
-                while file_path.exists():
-                    file_path = output_dir / f"{safe_title}_{counter:02d}.md"
-                    counter += 1
-
-                file_path.write_text(md_content, encoding='utf-8')
-                saved_files[str(file_path)] = md_content
-
-                logger.debug(f"💾 Saved chunk {i + 1}: {file_path.name}")
-
-            except Exception as e:
-                logger.warning(f"Failed to save chunk {i + 1}: {e}")
-                continue
-
-        return saved_files
-
-    def _extract_chunk_title(self, chunk_text: str, chunk_index: int) -> str:
-        """Extract meaningful title from chunk content."""
-        lines = [line.strip() for line in chunk_text.split('\n') if line.strip()]
-
-        # Look for markdown headers first
-        for line in lines[:5]:
-            if line.startswith('#'):
-                return re.sub(r'^#+\s*', '', line).strip()
-
-        # Look for title-like content (short, capitalized lines)
-        for line in lines[:3]:
-            if len(line) < 100 and len(line) > 5:
-                # Check if it looks like a title (mostly title case, no lowercase articles)
-                words = line.split()
-                if len(words) <= 8 and any(word[0].isupper() for word in words):
-                    return line
-
-        # Fallback: use first meaningful sentence
-        for line in lines[:3]:
-            if len(line) > 10 and len(line) < 150:
-                return line
-
-        # Final fallback
-        return f"Section_{chunk_index + 1:03d}"
 
     def _create_enhanced_metadata_header(self, pdf_name: str, content_metadata: Dict) -> str:
         """Create comprehensive YAML front matter for markdown files."""
