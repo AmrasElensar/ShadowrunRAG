@@ -21,13 +21,14 @@ from typing import Dict, Optional, Callable, List, Tuple
 import traceback
 import re
 
-# Marker imports (GPU-accelerated extraction)
+# Updated Marker imports (NEW API)
 try:
-    from marker.convert import convert_single_pdf
-    from marker.models import load_all_models
+    from marker.converters.pdf import PdfConverter
+    from marker.models import create_model_dict
+    from marker.output import text_from_rendered
     MARKER_AVAILABLE = True
     logger = logging.getLogger(__name__)
-    logger.info("✅ Marker PDF processing available (GPU-accelerated)")
+    logger.info("✅ Marker PDF processing available (NEW API - GPU-accelerated)")
 except ImportError:
     MARKER_AVAILABLE = False
     logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ class SimpleProgressHandler(logging.Handler):
 
         # Enhanced stage patterns for all extraction methods
         self.stage_patterns = {
-            # Marker GPU stages
+            # Marker GPU stages (updated for new API)
             "Loading models": ("marker_init", 10, "Loading Marker GPU models..."),
             "Converting PDF": ("marker_processing", 30, "Marker GPU acceleration active..."),
             "Extracting text": ("marker_extraction", 60, "GPU extracting text and layout..."),
@@ -112,7 +113,7 @@ class SimpleProgressHandler(logging.Handler):
             pass
 
 class EnhancedPDFProcessor:
-    """Enhanced PDF processor with 4-tier extraction hierarchy."""
+    """Enhanced PDF processor with 4-tier extraction hierarchy using NEW Marker API."""
 
     def __init__(
             self,
@@ -133,8 +134,8 @@ class EnhancedPDFProcessor:
         self.document_type = document_type
         self.use_gpu = use_gpu
 
-        # GPU model cache for Marker (expensive to load)
-        self._marker_models = None
+        # NEW: Updated model cache for new Marker API
+        self._marker_converter = None
         self._models_loading = False
 
         # Create debug directory
@@ -148,80 +149,92 @@ class EnhancedPDFProcessor:
         logger.info(f"  - Marker available: {MARKER_AVAILABLE}")
         logger.info(f"  - Unstructured available: {UNSTRUCTURED_AVAILABLE}")
 
-    def _load_marker_models(self):
-        """Load Marker models once and cache them (GPU-intensive operation)."""
+    def _load_marker_converter(self):
+        """Load Marker converter with NEW API (GPU-intensive operation)."""
         if not MARKER_AVAILABLE or not self.use_gpu:
             return None
 
-        if self._marker_models is not None:
-            return self._marker_models
+        if self._marker_converter is not None:
+            return self._marker_converter
 
         if self._models_loading:
             # Another thread is loading, wait briefly
             for _ in range(30):  # Wait up to 30 seconds
                 time.sleep(1)
-                if self._marker_models is not None:
-                    return self._marker_models
+                if self._marker_converter is not None:
+                    return self._marker_converter
             return None
 
         try:
             self._models_loading = True
 
             if self.progress_callback:
-                self.progress_callback("marker_init", 10, "Loading Marker GPU models (this may take a moment)...")
+                self.progress_callback("marker_init", 10, "Loading Marker GPU models (NEW API)...")
 
-            logger.info("🚀 Loading Marker models for GPU acceleration...")
+            logger.info("🚀 Loading Marker converter with NEW API for GPU acceleration...")
             start_time = time.time()
 
-            # Load all required models for GPU processing
-            self._marker_models = load_all_models()
+            # New API: Create PDF converter with hybrid mode
+            ollama_config = {
+                'ollama_base_url': 'http://ollama:11434',
+                'ollama_model': 'qwen2.5:14b-instruct-q6_K'  # Best model for table reasoning
+            }
+
+            model_dict = create_model_dict()
+
+            self._marker_converter = PdfConverter(
+                artifact_dict=model_dict,
+                llm_service='marker.services.ollama.OllamaService',  # Enable hybrid mode
+                config=ollama_config  # Ollama configuration
+            )
 
             load_time = time.time() - start_time
-            logger.info(f"✅ Marker models loaded successfully ({load_time:.1f}s)")
+            logger.info(f"✅ Marker converter loaded successfully ({load_time:.1f}s)")
 
             if self.progress_callback:
-                self.progress_callback("marker_ready", 15, f"Marker GPU models ready ({load_time:.1f}s)")
+                self.progress_callback("marker_ready", 15, f"Marker GPU converter ready ({load_time:.1f}s)")
 
         except Exception as e:
-            logger.error(f"❌ Failed to load Marker models: {e}")
-            self._marker_models = None
+            logger.error(f"❌ Failed to load Marker converter: {e}")
+            self._marker_converter = None
 
         finally:
             self._models_loading = False
 
-        return self._marker_models
+        return self._marker_converter
 
     def _extract_with_marker(self, pdf_path: Path) -> Optional[str]:
-        """Primary extraction method: Marker GPU acceleration for multi-column layouts."""
+        """Primary extraction method: Marker GPU acceleration with NEW API for multi-column layouts."""
         if not MARKER_AVAILABLE or not self.use_gpu:
             logger.info("Marker not available or GPU disabled, skipping...")
             return None
 
         try:
             if self.progress_callback:
-                self.progress_callback("marker_processing", 20, "Starting Marker GPU extraction...")
+                self.progress_callback("marker_processing", 20, "Starting Marker GPU extraction (NEW API)...")
 
-            # Load models (cached after first use)
-            models = self._load_marker_models()
-            if not models:
-                logger.warning("Could not load Marker models")
+            # Load converter (cached after first use)
+            converter = self._load_marker_converter()
+            if not converter:
+                logger.warning("Could not load Marker converter")
                 return None
 
-            logger.info(f"🎯 Processing {pdf_path.name} with Marker GPU acceleration...")
+            logger.info(f"🎯 Processing {pdf_path.name} with Marker GPU acceleration (NEW API)...")
 
-            # Configure Marker for optimal extraction
+            # NEW API: Convert PDF using updated syntax
             start_time = time.time()
 
-            # Convert PDF to markdown using Marker's GPU acceleration
-            full_text, images, out_meta = convert_single_pdf(
-                str(pdf_path),
-                models,
-                max_pages=None,  # Process all pages
-                langs=["en"],  # English content
-                batch_multiplier=2,  # GPU optimization for RTX 4090
-                start_page=None,  # Process from beginning
-                ocr_all_pages=self.use_ocr  # OCR fallback if needed
-            )
+            if self.progress_callback:
+                self.progress_callback("marker_converting", 40, "Running Marker conversion...")
+
+            # NEW API: converter(pdf_path) returns rendered document
+            rendered_doc = converter(str(pdf_path))
+
+            if self.progress_callback:
+                self.progress_callback("marker_extracting", 60, "Extracting text from rendered document...")
+
+            # NEW API: Extract text from rendered document
+            full_text = text_from_rendered(rendered_doc)
 
             extraction_time = time.time() - start_time
 
@@ -239,12 +252,12 @@ class EnhancedPDFProcessor:
             if self.debug_mode:
                 debug_file = self.debug_dir / f"{pdf_path.stem}_marker_debug.json"
                 debug_info = {
-                    "extraction_method": "marker_gpu",
+                    "extraction_method": "marker_gpu_new_api",
                     "processing_time": extraction_time,
                     "content_length": len(full_text),
-                    "metadata": out_meta,
-                    "images_found": len(images) if images else 0,
-                    "success": True
+                    "api_version": "new_converter_api",
+                    "success": True,
+                    "rendered_doc_type": type(rendered_doc).__name__
                 }
                 debug_file.write_text(json.dumps(debug_info, indent=2))
 
@@ -259,7 +272,7 @@ class EnhancedPDFProcessor:
             if self.debug_mode:
                 debug_file = self.debug_dir / f"{pdf_path.stem}_marker_error.json"
                 debug_info = {
-                    "extraction_method": "marker_gpu",
+                    "extraction_method": "marker_gpu_new_api",
                     "error": str(e),
                     "traceback": traceback.format_exc(),
                     "success": False
@@ -577,7 +590,7 @@ class EnhancedPDFProcessor:
         """Main extraction orchestrator: 4-tier hierarchy with fallbacks."""
 
         extraction_methods = [
-            ("Marker GPU", self._extract_with_marker, "🎯"),
+            ("Marker GPU (NEW API)", self._extract_with_marker, "🎯"),
             ("PyMuPDF + TOC", self._extract_with_pymupdf_toc, "📚"),
             ("Unstructured Emergency", self._extract_with_unstructured_fallback, "🚨"),
             ("Basic Text", self._extract_emergency_text, "🆘")
@@ -606,7 +619,7 @@ class EnhancedPDFProcessor:
                     logger.info(f"✅ {method_name} successful in {method_time:.1f}s")
 
                     # Clear GPU cache after Marker
-                    if method_name == "Marker GPU":
+                    if "Marker GPU" in method_name:
                         self._clear_gpu_cache()
 
                     return result
@@ -792,7 +805,7 @@ class EnhancedPDFProcessor:
         return chunks if chunks else [text]  # Emergency: return full text as single chunk
 
     def process_pdf(self, pdf_path: str, force_reparse: bool = False) -> Dict[str, str]:
-        """Main processing method: Enhanced PDF extraction with 4-tier hierarchy."""
+        """Main processing method: Enhanced PDF extraction with 4-tier hierarchy and NEW Marker API."""
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
@@ -807,7 +820,7 @@ class EnhancedPDFProcessor:
             logger.info(f"⏭️ Skipping {pdf_name} (already processed with enhanced pipeline)")
             return self._load_existing_files(output_subdir)
 
-        logger.info(f"🚀 Processing {pdf_path} as {self.document_type} with enhanced 4-tier extraction")
+        logger.info(f"🚀 Processing {pdf_path} as {self.document_type} with enhanced 4-tier extraction (NEW Marker API)")
 
         # Set up progress tracking
         progress_handler = None
@@ -819,7 +832,7 @@ class EnhancedPDFProcessor:
                 logging.getLogger().addHandler(progress_handler)
                 self.progress_callback("starting", 5, f"Starting enhanced {self.document_type} processing...")
 
-            # STAGE 1: Enhanced PDF extraction (4-tier hierarchy)
+            # STAGE 1: Enhanced PDF extraction (4-tier hierarchy with NEW Marker API)
             if self.progress_callback:
                 self.progress_callback("extracting", 10, "Running enhanced extraction pipeline...")
 
@@ -960,9 +973,9 @@ edition: "{content_metadata.get('edition', 'unknown')}"
 primary_focus: "{content_metadata.get('primary_focus', 'general')}"
 detected_sections: {content_metadata.get('detected_sections', [])}
 extraction_quality: "{content_metadata.get('extraction_quality', 'unknown')}"
-processor_version: "enhanced_4tier_v1"
+processor_version: "enhanced_4tier_v2_new_marker_api"
 processed_date: "{time.strftime('%Y-%m-%d %H:%M:%S')}"
-extraction_hierarchy: ["marker_gpu", "pymupdf_toc", "unstructured_emergency", "basic_text"]
+extraction_hierarchy: ["marker_gpu_new_api", "pymupdf_toc", "unstructured_emergency", "basic_text"]
 ---"""
 
     def _load_existing_files(self, output_dir: Path) -> Dict[str, str]:
@@ -979,12 +992,12 @@ extraction_hierarchy: ["marker_gpu", "pymupdf_toc", "unstructured_emergency", "b
         metadata = {
             "source": str(pdf_path),
             "processed_at": time.strftime('%Y-%m-%d %H:%M:%S'),
-            "processor_version": "enhanced_4tier_v1",
+            "processor_version": "enhanced_4tier_v2_new_marker_api",
             "extraction_time_seconds": round(extraction_time, 2),
             "chunks_created": chunks_created,
             "document_type": self.document_type,
             "content_metadata": content_metadata,
-            "extraction_hierarchy": ["marker_gpu", "pymupdf_toc", "unstructured_emergency", "basic_text"],
+            "extraction_hierarchy": ["marker_gpu_new_api", "pymupdf_toc", "unstructured_emergency", "basic_text"],
             "processing_config": {
                 "chunk_size": self.chunk_size,
                 "use_gpu": self.use_gpu,
@@ -994,7 +1007,8 @@ extraction_hierarchy: ["marker_gpu", "pymupdf_toc", "unstructured_emergency", "b
             "capabilities": {
                 "marker_available": MARKER_AVAILABLE,
                 "unstructured_available": UNSTRUCTURED_AVAILABLE,
-                "gpu_acceleration": self.use_gpu and MARKER_AVAILABLE
+                "gpu_acceleration": self.use_gpu and MARKER_AVAILABLE,
+                "marker_api_version": "new_converter_api"
             }
         }
 
@@ -1013,7 +1027,7 @@ PDFProcessor = EnhancedPDFProcessor
 # Convenience function for quick processing
 def process_pdf_enhanced(pdf_path: str, document_type: str = "rulebook",
                          use_gpu: bool = True, progress_callback=None) -> Dict[str, str]:
-    """Convenience function for enhanced PDF processing."""
+    """Convenience function for enhanced PDF processing with NEW Marker API."""
     processor = EnhancedPDFProcessor(
         document_type=document_type,
         use_gpu=use_gpu,
@@ -1040,7 +1054,7 @@ if __name__ == "__main__":
 
     if len(sys.argv) > 1:
         pdf_path = sys.argv[1]
-        print(f"🎯 Testing enhanced PDF processor on: {pdf_path}")
+        print(f"🎯 Testing enhanced PDF processor with NEW Marker API on: {pdf_path}")
 
 
         def progress_printer(stage, progress, details):
@@ -1049,7 +1063,13 @@ if __name__ == "__main__":
 
         result = process_pdf_enhanced(pdf_path, progress_callback=progress_printer)
         print(f"✅ Processed successfully: {len(result)} files created")
+
+        # Display capabilities
+        print(f"\n🔧 Capabilities:")
+        print(f"   - Marker GPU (NEW API): {MARKER_AVAILABLE}")
+        print(f"   - Unstructured fallback: {UNSTRUCTURED_AVAILABLE}")
+        print(f"   - 4-tier extraction hierarchy: ✅")
     else:
         print("Usage: python pdf_processor.py <path_to_pdf>")
-        print("🎲 Enhanced Shadowrun RAG PDF Processor v1.0")
-        print("Features: Marker GPU, PyMuPDF+TOC, Unstructured fallback, Emergency extraction")
+        print("🎲 Enhanced Shadowrun RAG PDF Processor v2.0 (NEW Marker API)")
+        print("Features: Marker GPU (NEW API), PyMuPDF+TOC, Unstructured fallback, Emergency extraction")

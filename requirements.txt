@@ -46,8 +46,7 @@ tiktoken==0.8.0
 # Marker Dependencies (PyTorch installed separately first)
 # ===================
 # Marker PDF processing (GPU-accelerated multi-column extraction)
-marker-pdf==0.2.15
-surya-ocr>=0.4.14          # Marker's OCR component with GPU support
+marker-pdf>=1.8.0,<2.0.0
 
 # NOTE: detectron2 installed separately in Dockerfile after PyTorch
 # detectron2 @ git+https://github.com/facebookresearch/detectron2.git
