@@ -39,19 +39,19 @@ services:
       - ./data:/app/data:rw
       - ./backend:/app/backend
       - ./tools:/app/tools
+      - ./cache/marker:/root/.cache/datalab  # Marker models (2.5GB)
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - EMBEDDING_MODEL=nomic-embed-text
-      
-      # Switch to Llama3 8B - fast and reliable
-      - LLM_MODEL=llama3:8b-instruct-q4_K_M
+
+      - LLM_MODEL=phi4-reasoning:plus
       
       # Optimized for fast single-GPU inference
       - MODEL_TEMPERATURE=0.3              
       - MODEL_TOP_K=40                     
       - MODEL_TOP_P=0.9
       - MODEL_REPEAT_PENALTY=1.05
-      - MODEL_NUM_CTX=4096                 # Full context window
+      - MODEL_NUM_CTX=6144                 # Full context window
       - MODEL_NUM_BATCH=128                # Larger batch for speed
       
       # Embedding model will auto-load/unload as needed

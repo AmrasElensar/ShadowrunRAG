@@ -150,7 +150,7 @@ class EnhancedPDFProcessor:
         logger.info(f"  - Unstructured available: {UNSTRUCTURED_AVAILABLE}")
 
     def _load_marker_converter(self):
-        """Load Marker converter with NEW API (GPU-intensive operation)."""
+        """Load Marker converter with NEW API and hybrid mode support."""
         if not MARKER_AVAILABLE or not self.use_gpu:
             return None
 
@@ -169,12 +169,12 @@ class EnhancedPDFProcessor:
             self._models_loading = True
 
             if self.progress_callback:
-                self.progress_callback("marker_init", 10, "Loading Marker GPU models (NEW API)...")
+                self.progress_callback("marker_init", 10, "Loading Marker GPU models with hybrid LLM support...")
 
-            logger.info("🚀 Loading Marker converter with NEW API for GPU acceleration...")
+            logger.info("🚀 Loading Marker converter with NEW API + hybrid LLM mode...")
             start_time = time.time()
 
-            # New API: Create PDF converter with hybrid mode
+            # NEW API: Create PDF converter with hybrid mode
             ollama_config = {
                 'ollama_base_url': 'http://ollama:11434',
                 'ollama_model': 'qwen2.5:14b-instruct-q6_K'  # Best model for table reasoning
@@ -189,10 +189,10 @@ class EnhancedPDFProcessor:
             )
 
             load_time = time.time() - start_time
-            logger.info(f"✅ Marker converter loaded successfully ({load_time:.1f}s)")
+            logger.info(f"✅ Marker converter loaded successfully with hybrid LLM ({load_time:.1f}s)")
 
             if self.progress_callback:
-                self.progress_callback("marker_ready", 15, f"Marker GPU converter ready ({load_time:.1f}s)")
+                self.progress_callback("marker_ready", 15, f"Marker GPU + LLM converter ready ({load_time:.1f}s)")
 
         except Exception as e:
             logger.error(f"❌ Failed to load Marker converter: {e}")
@@ -204,14 +204,14 @@ class EnhancedPDFProcessor:
         return self._marker_converter
 
     def _extract_with_marker(self, pdf_path: Path) -> Optional[str]:
-        """Primary extraction method: Marker GPU acceleration with NEW API for multi-column layouts."""
+        """Primary extraction method: Marker GPU + LLM hybrid for perfect table extraction."""
         if not MARKER_AVAILABLE or not self.use_gpu:
             logger.info("Marker not available or GPU disabled, skipping...")
             return None
 
         try:
             if self.progress_callback:
-                self.progress_callback("marker_processing", 20, "Starting Marker GPU extraction (NEW API)...")
+                self.progress_callback("marker_processing", 20, "Starting Marker GPU + LLM hybrid extraction...")
 
             # Load converter (cached after first use)
             converter = self._load_marker_converter()
@@ -219,13 +219,13 @@ class EnhancedPDFProcessor:
                 logger.warning("Could not load Marker converter")
                 return None
 
-            logger.info(f"🎯 Processing {pdf_path.name} with Marker GPU acceleration (NEW API)...")
+            logger.info(f"🎯 Processing {pdf_path.name} with Marker GPU + LLM hybrid (qwen2.5:14b)...")
 
             # NEW API: Convert PDF using updated syntax
             start_time = time.time()
 
             if self.progress_callback:
-                self.progress_callback("marker_converting", 40, "Running Marker conversion...")
+                self.progress_callback("marker_converting", 40, "Running Marker hybrid conversion...")
 
             # NEW API: converter(pdf_path) returns rendered document
             rendered_doc = converter(str(pdf_path))
@@ -233,46 +233,63 @@ class EnhancedPDFProcessor:
             if self.progress_callback:
                 self.progress_callback("marker_extracting", 60, "Extracting text from rendered document...")
 
-            # NEW API: Extract text from rendered document
-            full_text = text_from_rendered(rendered_doc)
+            # HYBRID MODE FIX: Handle tuple return from text_from_rendered
+            result = text_from_rendered(rendered_doc)
+
+            # Check if hybrid mode returned tuple (text, metadata) or just text
+            if isinstance(result, tuple):
+                full_text = result[0]  # First element is the text
+                metadata = result[1] if len(result) > 1 else None
+                logger.info(f"📊 Hybrid mode returned text + metadata: {len(full_text)} chars")
+                if metadata:
+                    logger.debug(
+                        f"🔍 Hybrid metadata keys: {list(metadata.keys()) if isinstance(metadata, dict) else type(metadata)}")
+            else:
+                full_text = result  # Direct text return
+                metadata = None
+                logger.info(f"📝 Standard mode returned text: {len(full_text)} chars")
 
             extraction_time = time.time() - start_time
 
             if self.progress_callback:
-                self.progress_callback("marker_complete", 70, f"Marker extraction complete ({extraction_time:.1f}s)")
+                self.progress_callback("marker_complete", 70,
+                                       f"Marker hybrid extraction complete ({extraction_time:.1f}s)")
 
             # Validate extraction quality
             if not full_text or len(full_text.strip()) < 100:
-                logger.warning("Marker extraction produced insufficient content")
+                logger.warning("Marker hybrid extraction produced insufficient content")
                 return None
 
-            logger.info(f"✅ Marker success: {len(full_text)} chars in {extraction_time:.1f}s")
+            logger.info(f"✅ Marker hybrid success: {len(full_text)} chars in {extraction_time:.1f}s")
 
             # Save debug info if enabled
             if self.debug_mode:
-                debug_file = self.debug_dir / f"{pdf_path.stem}_marker_debug.json"
+                debug_file = self.debug_dir / f"{pdf_path.stem}_marker_hybrid_debug.json"
                 debug_info = {
-                    "extraction_method": "marker_gpu_new_api",
+                    "extraction_method": "marker_gpu_hybrid_llm",
                     "processing_time": extraction_time,
                     "content_length": len(full_text),
-                    "api_version": "new_converter_api",
+                    "api_version": "new_converter_api_hybrid",
+                    "llm_model": "qwen2.5:14b-instruct-q6_K",
                     "success": True,
-                    "rendered_doc_type": type(rendered_doc).__name__
+                    "rendered_doc_type": type(rendered_doc).__name__,
+                    "returned_tuple": isinstance(result, tuple),
+                    "has_metadata": metadata is not None
                 }
                 debug_file.write_text(json.dumps(debug_info, indent=2))
 
             return full_text
 
         except Exception as e:
-            logger.error(f"❌ Marker extraction failed: {e}")
+            logger.error(f"❌ Marker hybrid extraction failed: {e}")
             if self.progress_callback:
-                self.progress_callback("marker_failed", -1, f"Marker failed: {str(e)}")
+                self.progress_callback("marker_failed", -1, f"Marker hybrid failed: {str(e)}")
 
             # Save debug info for failed extraction
             if self.debug_mode:
-                debug_file = self.debug_dir / f"{pdf_path.stem}_marker_error.json"
+                debug_file = self.debug_dir / f"{pdf_path.stem}_marker_hybrid_error.json"
                 debug_info = {
-                    "extraction_method": "marker_gpu_new_api",
+                    "extraction_method": "marker_gpu_hybrid_llm",
                     "error": str(e),
                     "traceback": traceback.format_exc(),
                     "success": False
