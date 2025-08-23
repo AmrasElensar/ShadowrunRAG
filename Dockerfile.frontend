@@ -2,6 +2,8 @@ FROM python:3.11.9-slim
 
 WORKDIR /app
 
+ENV PYTHONPATH=/app
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
@@ -11,8 +13,8 @@ RUN apt-get update && apt-get install -y \
 COPY frontend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
-COPY frontend/gradio_app.py ./
+# Copy ALL application files (including modules)
+COPY frontend/ ./
 
 # Set environment variable default (will be overridden by docker-compose)
 ENV API_URL=http://backend:8000
