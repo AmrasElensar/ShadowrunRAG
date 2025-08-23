@@ -1,8 +1,110 @@
 """Pydantic response models for FastAPI endpoints."""
 
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any, Union
-from datetime import datetime
+from typing import List, Optional, Dict, Any
+
+class CharacterCreateRequest(BaseModel):
+    name: str
+    metatype: str = "Human"
+    archetype: str = ""
+
+class CharacterStatsUpdate(BaseModel):
+    body: int = 1
+    agility: int = 1
+    reaction: int = 1
+    strength: int = 1
+    charisma: int = 1
+    logic: int = 1
+    intuition: int = 1
+    willpower: int = 1
+    edge: int = 1
+    essence: float = 6.0
+    physical_limit: int = 1
+    mental_limit: int = 1
+    social_limit: int = 1
+    initiative: int = 1
+    hot_sim_vr: int = 0
+
+class CharacterResourcesUpdate(BaseModel):
+    nuyen: int = 0
+    street_cred: int = 0
+    notoriety: int = 0
+    public_aware: int = 0
+    total_karma: int = 0
+    available_karma: int = 0
+    edge_pool: int = 1
+
+class SkillAddRequest(BaseModel):
+    name: str
+    rating: int = 1
+    specialization: str = ""
+    skill_type: str = "active"
+    skill_group: str = ""
+    attribute: str = ""
+
+class QualityAddRequest(BaseModel):
+    name: str
+    rating: int = 0
+    karma_cost: int = 0
+    description: str = ""
+    quality_type: str = "positive"
+
+class GearAddRequest(BaseModel):
+    name: str
+    category: str = ""
+    subcategory: str = ""
+    quantity: int = 1
+    rating: int = 0
+    armor_value: int = 0
+    cost: int = 0
+    availability: str = ""
+    description: str = ""
+    custom_properties: Dict[str, Any] = {}
+
+class WeaponAddRequest(BaseModel):
+    name: str
+    weapon_type: str = "ranged"
+    mode_ammo: str = ""
+    accuracy: int = 0
+    damage_code: str = ""
+    armor_penetration: int = 0
+    recoil_compensation: int = 0
+    cost: int = 0
+    availability: str = ""
+    description: str = ""
+
+class VehicleAddRequest(BaseModel):
+    name: str
+    vehicle_type: str = "vehicle"
+    handling: int = 0
+    speed: int = 0
+    acceleration: int = 0
+    body: int = 0
+    armor: int = 0
+    pilot: int = 0
+    sensor: int = 0
+    seats: int = 0
+    cost: int = 0
+    availability: str = ""
+    description: str = ""
+
+class CyberdeckUpdate(BaseModel):
+    name: str = ""
+    device_rating: int = 1
+    attack: int = 0
+    sleaze: int = 0
+    firewall: int = 0
+    data_processing: int = 0
+    matrix_damage: int = 0
+    cost: int = 0
+    availability: str = ""
+    description: str = ""
+
+class ProgramAddRequest(BaseModel):
+    name: str
+    rating: int = 1
+    program_type: str = "common"
+    description: str = ""
 
 
 class HealthCheckResponse(BaseModel):

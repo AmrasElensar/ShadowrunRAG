@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, F
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import List, Optional, Dict, Any
 from pathlib import Path
 import logging
 import json
@@ -16,9 +16,13 @@ from .indexer import IncrementalIndexer
 from .retriever import Retriever
 from .models import (
     HealthCheckResponse, UploadResponse, JobStatusResponse, JobsListResponse, JobInfo,
-    QueryResponse, IndexResponse, DocumentsResponse, ModelsResponse, SystemStatusResponse
+    QueryResponse, IndexResponse, DocumentsResponse, ModelsResponse, SystemStatusResponse, CharacterCreateRequest,
+    CharacterStatsUpdate, CharacterResourcesUpdate, SkillAddRequest, QualityAddRequest, GearAddRequest,
+    WeaponAddRequest, VehicleAddRequest, CyberdeckUpdate, ProgramAddRequest
 )
 from tools.pdf_processor import PDFProcessor
+from backend.character_manager import get_character_manager
+from backend.extractors import populate_reference_tables
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -687,6 +691,516 @@ async def status():
     except Exception as e:
         logger.error(f"Status check failed: {e}")
         return SystemStatusResponse(status="degraded", error=str(e))
+
+
+# ===== CHARACTER MANAGEMENT ENDPOINTS =====
+
+@app.get("/characters")
+async def list_characters():
+    """Get list of all characters."""
+    try:
+        manager = get_character_manager()
+        characters = manager.get_character_list()
+        return {"characters": characters}
+    except Exception as e:
+        logger.error(f"Error listing characters: {e}")
+        raise HTTPException(500, f"Failed to list characters: {str(e)}")
+
+
+@app.post("/characters")
+async def create_character(request: CharacterCreateRequest):
+    """Create a new character."""
+    try:
+        manager = get_character_manager()
+        character_id = manager.create_character(request.name, request.metatype, request.archetype)
+        return {
+            "character_id": character_id,
+            "message": f"Character '{request.name}' created successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error creating character: {e}")
+        raise HTTPException(500, f"Failed to create character: {str(e)}")
+
+
+@app.get("/characters/{character_id}")
+async def get_character(character_id: int):
+    """Get complete character data."""
+    try:
+        manager = get_character_manager()
+        character_data = manager.get_character_full_data(character_id)
+        if not character_data:
+            raise HTTPException(404, "Character not found")
+        return {"character": character_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting character: {e}")
+        raise HTTPException(500, f"Failed to get character: {str(e)}")
+
+
+@app.delete("/characters/{character_id}")
+async def delete_character(character_id: int):
+    """Delete a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.delete_character(character_id)
+        if not success:
+            raise HTTPException(404, "Character not found")
+        return {"message": "Character deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting character: {e}")
+        raise HTTPException(500, f"Failed to delete character: {str(e)}")
+
+
+@app.get("/characters/active")
+async def get_active_character():
+    """Get the currently active character."""
+    try:
+        manager = get_character_manager()
+        active_id = manager.db.get_active_character_id()
+        if not active_id:
+            return {"active_character": None}
+
+        character_data = manager.get_character_full_data(active_id)
+        return {"active_character": character_data}
+    except Exception as e:
+        logger.error(f"Error getting active character: {e}")
+        raise HTTPException(500, f"Failed to get active character: {str(e)}")
+
+
+@app.post("/characters/{character_id}/activate")
+async def set_active_character(character_id: int):
+    """Set the active character."""
+    try:
+        manager = get_character_manager()
+        # Verify character exists
+        character_data = manager.get_character_full_data(character_id)
+        if not character_data:
+            raise HTTPException(404, "Character not found")
+
+        manager.db.set_active_character_id(character_id)
+        return {"message": f"Active character set to '{character_data['name']}'"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error setting active character: {e}")
+        raise HTTPException(500, f"Failed to set active character: {str(e)}")
+
+
+# ===== CHARACTER DATA UPDATE ENDPOINTS =====
+
+@app.put("/characters/{character_id}/stats")
+async def update_character_stats(character_id: int, stats: CharacterStatsUpdate):
+    """Update character statistics."""
+    try:
+        manager = get_character_manager()
+        success = manager.update_character_stats(character_id, stats.dict())
+        if not success:
+            raise HTTPException(404, "Character not found or update failed")
+        return {"message": "Character stats updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating character stats: {e}")
+        raise HTTPException(500, f"Failed to update stats: {str(e)}")
+
+
+@app.put("/characters/{character_id}/resources")
+async def update_character_resources(character_id: int, resources: CharacterResourcesUpdate):
+    """Update character resources."""
+    try:
+        manager = get_character_manager()
+        success = manager.update_character_resources(character_id, resources.dict())
+        if not success:
+            raise HTTPException(404, "Character not found or update failed")
+        return {"message": "Character resources updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating character resources: {e}")
+        raise HTTPException(500, f"Failed to update resources: {str(e)}")
+
+
+# ===== SKILLS MANAGEMENT =====
+
+@app.post("/characters/{character_id}/skills")
+async def add_character_skill(character_id: int, skill: SkillAddRequest):
+    """Add a skill to a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.add_character_skill(character_id, skill.dict())
+        if not success:
+            raise HTTPException(400, "Failed to add skill")
+        return {"message": f"Skill '{skill.name}' added successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding character skill: {e}")
+        raise HTTPException(500, f"Failed to add skill: {str(e)}")
+
+
+@app.put("/characters/{character_id}/skills/{skill_name}")
+async def update_character_skill(character_id: int, skill_name: str, skill: SkillAddRequest):
+    """Update an existing character skill."""
+    try:
+        manager = get_character_manager()
+        success = manager.update_character_skill(character_id, skill_name, skill.dict())
+        if not success:
+            raise HTTPException(404, "Skill not found")
+        return {"message": f"Skill '{skill_name}' updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating character skill: {e}")
+        raise HTTPException(500, f"Failed to update skill: {str(e)}")
+
+
+@app.delete("/characters/{character_id}/skills/{skill_name}")
+async def remove_character_skill(character_id: int, skill_name: str):
+    """Remove a skill from a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.remove_character_skill(character_id, skill_name)
+        if not success:
+            raise HTTPException(404, "Skill not found")
+        return {"message": f"Skill '{skill_name}' removed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing character skill: {e}")
+        raise HTTPException(500, f"Failed to remove skill: {str(e)}")
+
+
+# ===== QUALITIES MANAGEMENT =====
+
+@app.post("/characters/{character_id}/qualities")
+async def add_character_quality(character_id: int, quality: QualityAddRequest):
+    """Add a quality to a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.add_character_quality(character_id, quality.dict())
+        if not success:
+            raise HTTPException(400, "Failed to add quality")
+        return {"message": f"Quality '{quality.name}' added successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding character quality: {e}")
+        raise HTTPException(500, f"Failed to add quality: {str(e)}")
+
+
+@app.delete("/characters/{character_id}/qualities/{quality_name}")
+async def remove_character_quality(character_id: int, quality_name: str):
+    """Remove a quality from a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.remove_character_quality(character_id, quality_name)
+        if not success:
+            raise HTTPException(404, "Quality not found")
+        return {"message": f"Quality '{quality_name}' removed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing character quality: {e}")
+        raise HTTPException(500, f"Failed to remove quality: {str(e)}")
+
+
+# ===== GEAR MANAGEMENT =====
+
+@app.post("/characters/{character_id}/gear")
+async def add_character_gear(character_id: int, gear: GearAddRequest):
+    """Add gear to a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.add_character_gear(character_id, gear.dict())
+        if not success:
+            raise HTTPException(400, "Failed to add gear")
+        return {"message": f"Gear '{gear.name}' added successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding character gear: {e}")
+        raise HTTPException(500, f"Failed to add gear: {str(e)}")
+
+
+@app.delete("/characters/{character_id}/gear/{gear_id}")
+async def remove_character_gear(character_id: int, gear_id: int):
+    """Remove gear from a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.remove_character_gear(character_id, gear_id)
+        if not success:
+            raise HTTPException(404, "Gear not found")
+        return {"message": "Gear removed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing character gear: {e}")
+        raise HTTPException(500, f"Failed to remove gear: {str(e)}")
+
+
+# ===== WEAPONS MANAGEMENT =====
+
+@app.post("/characters/{character_id}/weapons")
+async def add_character_weapon(character_id: int, weapon: WeaponAddRequest):
+    """Add weapon to a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.add_character_weapon(character_id, weapon.dict())
+        if not success:
+            raise HTTPException(400, "Failed to add weapon")
+        return {"message": f"Weapon '{weapon.name}' added successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding character weapon: {e}")
+        raise HTTPException(500, f"Failed to add weapon: {str(e)}")
+
+
+@app.delete("/characters/{character_id}/weapons/{weapon_id}")
+async def remove_character_weapon(character_id: int, weapon_id: int):
+    """Remove weapon from a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.remove_character_weapon(character_id, weapon_id)
+        if not success:
+            raise HTTPException(404, "Weapon not found")
+        return {"message": "Weapon removed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing character weapon: {e}")
+        raise HTTPException(500, f"Failed to remove weapon: {str(e)}")
+
+
+# ===== VEHICLES MANAGEMENT =====
+
+@app.post("/characters/{character_id}/vehicles")
+async def add_character_vehicle(character_id: int, vehicle: VehicleAddRequest):
+    """Add vehicle/drone to a character."""
+    try:
+        manager = get_character_manager()
+        vehicle_data = vehicle.dict()
+        success = manager.add_character_vehicle(character_id, vehicle_data)
+        if not success:
+            raise HTTPException(400, "Failed to add vehicle")
+        return {"message": f"Vehicle '{vehicle.name}' added successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding character vehicle: {e}")
+        raise HTTPException(500, f"Failed to add vehicle: {str(e)}")
+
+
+@app.delete("/characters/{character_id}/vehicles/{vehicle_id}")
+async def remove_character_vehicle(character_id: int, vehicle_id: int):
+    """Remove vehicle from a character."""
+    try:
+        manager = get_character_manager()
+        success = manager.remove_character_vehicle(character_id, vehicle_id)
+        if not success:
+            raise HTTPException(404, "Vehicle not found")
+        return {"message": "Vehicle removed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing character vehicle: {e}")
+        raise HTTPException(500, f"Failed to remove vehicle: {str(e)}")
+
+
+# ===== CYBERDECK & PROGRAMS =====
+
+@app.put("/characters/{character_id}/cyberdeck")
+async def update_character_cyberdeck(character_id: int, cyberdeck: CyberdeckUpdate):
+    """Update character's cyberdeck."""
+    try:
+        manager = get_character_manager()
+        success = manager.update_character_cyberdeck(character_id, cyberdeck.dict())
+        if not success:
+            raise HTTPException(400, "Failed to update cyberdeck")
+        return {"message": "Cyberdeck updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating character cyberdeck: {e}")
+        raise HTTPException(500, f"Failed to update cyberdeck: {str(e)}")
+
+
+@app.post("/characters/{character_id}/programs")
+async def add_character_program(character_id: int, program: ProgramAddRequest):
+    """Add program to character's cyberdeck."""
+    try:
+        manager = get_character_manager()
+        success = manager.add_character_program(character_id, program.dict())
+        if not success:
+            raise HTTPException(400, "Failed to add program")
+        return {"message": f"Program '{program.name}' added successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding character program: {e}")
+        raise HTTPException(500, f"Failed to add program: {str(e)}")
+
+
+@app.delete("/characters/{character_id}/programs/{program_id}")
+async def remove_character_program(character_id: int, program_id: int):
+    """Remove program from character."""
+    try:
+        manager = get_character_manager()
+        success = manager.remove_character_program(character_id, program_id)
+        if not success:
+            raise HTTPException(404, "Program not found")
+        return {"message": "Program removed successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing character program: {e}")
+        raise HTTPException(500, f"Failed to remove program: {str(e)}")
+
+
+# ===== REFERENCE DATA ENDPOINTS =====
+
+@app.get("/reference/skills")
+async def get_skills_library(skill_type: Optional[str] = None):
+    """Get available skills from rulebooks for dropdowns."""
+    try:
+        manager = get_character_manager()
+        skills = manager.get_skills_library(skill_type)
+        return {"skills": skills}
+    except Exception as e:
+        logger.error(f"Error getting skills library: {e}")
+        raise HTTPException(500, f"Failed to get skills: {str(e)}")
+
+
+@app.get("/reference/qualities")
+async def get_qualities_library(quality_type: Optional[str] = None):
+    """Get available qualities from rulebooks for dropdowns."""
+    try:
+        manager = get_character_manager()
+        qualities = manager.get_qualities_library(quality_type)
+        return {"qualities": qualities}
+    except Exception as e:
+        logger.error(f"Error getting qualities library: {e}")
+        raise HTTPException(500, f"Failed to get qualities: {str(e)}")
+
+
+@app.get("/reference/gear")
+async def get_gear_library(category: Optional[str] = None):
+    """Get available gear from rulebooks for dropdowns."""
+    try:
+        manager = get_character_manager()
+        gear = manager.get_gear_library(category)
+        return {"gear": gear}
+    except Exception as e:
+        logger.error(f"Error getting gear library: {e}")
+        raise HTTPException(500, f"Failed to get gear: {str(e)}")
+
+
+@app.get("/reference/gear/categories")
+async def get_gear_categories():
+    """Get list of available gear categories."""
+    try:
+        manager = get_character_manager()
+        categories = manager.get_gear_categories()
+        return {"categories": categories}
+    except Exception as e:
+        logger.error(f"Error getting gear categories: {e}")
+        raise HTTPException(500, f"Failed to get categories: {str(e)}")
+
+
+@app.post("/reference/populate")
+async def populate_reference_data():
+    """Populate reference tables from processed rulebooks."""
+    try:
+        populate_reference_tables()
+        return {"message": "Reference tables populated successfully from rulebooks"}
+    except Exception as e:
+        logger.error(f"Error populating reference data: {e}")
+        raise HTTPException(500, f"Failed to populate reference data: {str(e)}")
+
+
+# ===== EXPORT ENDPOINTS =====
+
+@app.get("/characters/{character_id}/export/json")
+async def export_character_json(character_id: int):
+    """Export character as JSON for sharing with GM."""
+    try:
+        manager = get_character_manager()
+        json_data = manager.export_character_json(character_id)
+        if not json_data:
+            raise HTTPException(404, "Character not found")
+
+        # Return as downloadable file
+        from fastapi.responses import Response
+        return Response(
+            content=json_data,
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=character_{character_id}.json"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting character JSON: {e}")
+        raise HTTPException(500, f"Failed to export character: {str(e)}")
+
+
+@app.get("/characters/{character_id}/export/csv")
+async def export_character_csv(character_id: int):
+    """Export character as CSV for sharing with GM."""
+    try:
+        manager = get_character_manager()
+        csv_data = manager.export_character_csv(character_id)
+        if not csv_data:
+            raise HTTPException(404, "Character not found")
+
+        # Return as downloadable file
+        from fastapi.responses import Response
+        return Response(
+            content=csv_data,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=character_{character_id}.csv"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting character CSV: {e}")
+        raise HTTPException(500, f"Failed to export character: {str(e)}")
+
+
+# ===== DICE POOL & QUERY HELPERS =====
+
+@app.get("/characters/{character_id}/dice_pool/{skill_name}")
+async def get_skill_dice_pool(character_id: int, skill_name: str):
+    """Get dice pool for a specific skill."""
+    try:
+        manager = get_character_manager()
+        dice_pool, explanation = manager.get_character_skill_dice_pool(character_id, skill_name)
+        return {
+            "character_id": character_id,
+            "skill_name": skill_name,
+            "dice_pool": dice_pool,
+            "explanation": explanation
+        }
+    except Exception as e:
+        logger.error(f"Error getting dice pool: {e}")
+        raise HTTPException(500, f"Failed to get dice pool: {str(e)}")
+
+
+@app.get("/characters/{character_id}/context")
+async def get_character_query_context(character_id: int):
+    """Get character context string for RAG queries."""
+    try:
+        manager = get_character_manager()
+        context = manager.generate_character_context_for_query(character_id)
+        return {
+            "character_id": character_id,
+            "context": context
+        }
+    except Exception as e:
+        logger.error(f"Error getting character context: {e}")
+        raise HTTPException(500, f"Failed to get character context: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

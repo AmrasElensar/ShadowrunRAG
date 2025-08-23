@@ -6,7 +6,6 @@ Includes document type selection, <think> tag support, and improved filtering
 import gradio as gr
 import requests
 import json
-import re
 
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -231,13 +230,314 @@ class RAGClient:
             logger.error(f"Reindex failed: {e}")
             return {"error": str(e)}
 
+
+class CharacterAPIClient:
+    """API client for character management operations."""
+
+    def __init__(self, api_url: str):
+        self.api_url = api_url
+
+    # Character management
+    def list_characters(self) -> List[Dict]:
+        try:
+            response = requests.get(f"{self.api_url}/characters", timeout=5)
+            response.raise_for_status()
+            return response.json().get("characters", [])
+        except Exception as e:
+            logger.error(f"Failed to list characters: {e}")
+            return []
+
+    def create_character(self, name: str, metatype: str = "Human", archetype: str = "") -> Dict:
+        try:
+            response = requests.post(
+                f"{self.api_url}/characters",
+                json={"name": name, "metatype": metatype, "archetype": archetype},
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to create character: {e}")
+            return {"error": str(e)}
+
+    def get_character(self, character_id: int) -> Dict:
+        try:
+            response = requests.get(f"{self.api_url}/characters/{character_id}", timeout=10)
+            response.raise_for_status()
+            return response.json().get("character", {})
+        except Exception as e:
+            logger.error(f"Failed to get character: {e}")
+            return {"error": str(e)}
+
+    def delete_character(self, character_id: int) -> Dict:
+        try:
+            response = requests.delete(f"{self.api_url}/characters/{character_id}", timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to delete character: {e}")
+            return {"error": str(e)}
+
+    def get_active_character(self) -> Optional[Dict]:
+        try:
+            response = requests.get(f"{self.api_url}/characters/active", timeout=5)
+            response.raise_for_status()
+            return response.json().get("active_character")
+        except Exception as e:
+            logger.error(f"Failed to get active character: {e}")
+            return None
+
+    def set_active_character(self, character_id: int) -> Dict:
+        try:
+            response = requests.post(f"{self.api_url}/characters/{character_id}/activate", timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to set active character: {e}")
+            return {"error": str(e)}
+
+    # Character data updates
+    def update_character_stats(self, character_id: int, stats: Dict) -> Dict:
+        try:
+            response = requests.put(
+                f"{self.api_url}/characters/{character_id}/stats",
+                json=stats,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to update character stats: {e}")
+            return {"error": str(e)}
+
+    def update_character_resources(self, character_id: int, resources: Dict) -> Dict:
+        try:
+            response = requests.put(
+                f"{self.api_url}/characters/{character_id}/resources",
+                json=resources,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to update character resources: {e}")
+            return {"error": str(e)}
+
+    # Skills management
+    def add_character_skill(self, character_id: int, skill_data: Dict) -> Dict:
+        try:
+            response = requests.post(
+                f"{self.api_url}/characters/{character_id}/skills",
+                json=skill_data,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to add skill: {e}")
+            return {"error": str(e)}
+
+    def remove_character_skill(self, character_id: int, skill_name: str) -> Dict:
+        try:
+            response = requests.delete(
+                f"{self.api_url}/characters/{character_id}/skills/{skill_name}",
+                timeout=5
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to remove skill: {e}")
+            return {"error": str(e)}
+
+    # Qualities management
+    def add_character_quality(self, character_id: int, quality_data: Dict) -> Dict:
+        try:
+            response = requests.post(
+                f"{self.api_url}/characters/{character_id}/qualities",
+                json=quality_data,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to add quality: {e}")
+            return {"error": str(e)}
+
+    def remove_character_quality(self, character_id: int, quality_name: str) -> Dict:
+        try:
+            response = requests.delete(
+                f"{self.api_url}/characters/{character_id}/qualities/{quality_name}",
+                timeout=5
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to remove quality: {e}")
+            return {"error": str(e)}
+
+    # Gear management
+    def add_character_gear(self, character_id: int, gear_data: Dict) -> Dict:
+        try:
+            response = requests.post(
+                f"{self.api_url}/characters/{character_id}/gear",
+                json=gear_data,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to add gear: {e}")
+            return {"error": str(e)}
+
+    def remove_character_gear(self, character_id: int, gear_id: int) -> Dict:
+        try:
+            response = requests.delete(
+                f"{self.api_url}/characters/{character_id}/gear/{gear_id}",
+                timeout=5
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to remove gear: {e}")
+            return {"error": str(e)}
+
+    # Reference data
+    def get_skills_library(self, skill_type: str = None) -> List[Dict]:
+        try:
+            url = f"{self.api_url}/reference/skills"
+            if skill_type:
+                url += f"?skill_type={skill_type}"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            return response.json().get("skills", [])
+        except Exception as e:
+            logger.error(f"Failed to get skills library: {e}")
+            return []
+
+    def get_qualities_library(self, quality_type: str = None) -> List[Dict]:
+        try:
+            url = f"{self.api_url}/reference/qualities"
+            if quality_type:
+                url += f"?quality_type={quality_type}"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            return response.json().get("qualities", [])
+        except Exception as e:
+            logger.error(f"Failed to get qualities library: {e}")
+            return []
+
+    def get_gear_library(self, category: str = None) -> List[Dict]:
+        try:
+            url = f"{self.api_url}/reference/gear"
+            if category:
+                url += f"?category={category}"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            return response.json().get("gear", [])
+        except Exception as e:
+            logger.error(f"Failed to get gear library: {e}")
+            return []
+
+    def get_gear_categories(self) -> List[str]:
+        try:
+            response = requests.get(f"{self.api_url}/reference/gear/categories", timeout=5)
+            response.raise_for_status()
+            return response.json().get("categories", [])
+        except Exception as e:
+            logger.error(f"Failed to get gear categories: {e}")
+            return []
+
+    def populate_reference_data(self) -> Dict:
+        try:
+            response = requests.post(f"{self.api_url}/reference/populate", timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to populate reference data: {e}")
+            return {"error": str(e)}
+
+    # Export
+    def export_character_json(self, character_id: int) -> bytes:
+        try:
+            response = requests.get(f"{self.api_url}/characters/{character_id}/export/json", timeout=10)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            logger.error(f"Failed to export character JSON: {e}")
+            return b""
+
+    def get_dice_pool(self, character_id: int, skill_name: str) -> Dict:
+        try:
+            response = requests.get(f"{self.api_url}/characters/{character_id}/dice_pool/{skill_name}", timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get dice pool: {e}")
+            return {"error": str(e)}
+
+    def add_character_vehicle(self, character_id: int, vehicle_data: Dict) -> Dict:
+        try:
+            response = requests.post(
+                f"{self.api_url}/characters/{character_id}/vehicles",
+                json=vehicle_data,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to add vehicle: {e}")
+            return {"error": str(e)}
+
+    def add_character_weapon(self, character_id: int, weapon_data: Dict) -> Dict:
+        try:
+            response = requests.post(
+                f"{self.api_url}/characters/{character_id}/weapons",
+                json=weapon_data,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to add weapon: {e}")
+            return {"error": str(e)}
+
+    def update_character_cyberdeck(self, character_id: int, cyberdeck_data: Dict) -> Dict:
+        try:
+            response = requests.put(
+                f"{self.api_url}/characters/{character_id}/cyberdeck",
+                json=cyberdeck_data,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to update cyberdeck: {e}")
+            return {"error": str(e)}
+
+    def get_character_query_context(self, character_id: int) -> Dict:
+        try:
+            response = requests.get(f"{self.api_url}/characters/{character_id}/context", timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get character context: {e}")
+            return {"error": str(e)}
+
+
 # Initialize client
 client = RAGClient()
+
+# Initialize character API client
+char_api = CharacterAPIClient(API_URL)
 
 # Global variables for pagination and state
 search_file_paths = {}
 current_search_params = {}
 current_page = 1
+
+# Global state for character management
+selected_character_id = None
+character_data_cache = {}
 
 # ===== UPLOAD TAB FUNCTIONS =====
 
@@ -324,32 +624,57 @@ def poll_progress():
 # ===== QUERY TAB FUNCTIONS =====
 
 def submit_query(
-    question: str,
-    model: str,
-    n_results: int,
-    query_type: str,
-    character_role: str,
-    character_stats: str,
-    edition: str,
-    filter_section: str,
-    filter_subsection: str,
-    filter_document_type: str,
-    filter_edition: str
+        question: str,
+        model: str,
+        n_results: int,
+        query_type: str,
+        character_role: str,
+        character_stats: str,
+        edition: str,
+        filter_section: str,
+        filter_subsection: str,
+        filter_document_type: str,
+        filter_edition: str,
+        character_selector: str = "None"  # NEW: Add this parameter
 ):
-    """Enhanced query submission with improved filtering and <think> tag support."""
+    """Enhanced query submission with character context integration."""
     if not question:
         yield "Please enter a question", "", "", [], gr.update(visible=False)
         return
 
-    # Prepare enhanced parameters
+    # NEW: Check for active character and dice pool queries
+    try:
+        active_char = char_api.get_active_character()
+
+        # Check if this is a dice pool question first
+        if active_char and any(keyword in question.lower() for keyword in
+                               ['dice', 'roll', 'pool', 'test', 'check']):
+            # Try to resolve as dice pool query
+            dice_result = char_api.get_dice_pool(active_char['id'], question)
+
+            if not dice_result.get('error') and dice_result.get('dice_pool', 0) > 0:
+                # This was successfully resolved as a dice pool query
+                explanation = dice_result.get('explanation', '')
+                dice_pool = dice_result.get('dice_pool', 0)
+
+                answer = f"🎲 **Dice Pool Calculation:**\n\n{explanation}\n\n**Total: {dice_pool} dice**"
+
+                yield answer, "", f"**Character:** {active_char['name']}", [], gr.update(visible=False)
+                return
+
+    except Exception as e:
+        logger.warning(f"Character context check failed: {e}")
+        # Continue with normal query if character check fails
+
+    # Prepare enhanced parameters (existing code)
     params = {
         "n_results": n_results,
         "query_type": query_type.lower(),
         "model": model,
-        "edition": edition if edition != "None" else "SR5"  # Default to SR5
+        "edition": edition if edition != "None" else "SR5"
     }
 
-    # Add optional parameters
+    # Add optional parameters (existing code)
     if character_role != "None":
         params["character_role"] = character_role.lower().replace(" ", "_")
     if character_stats:
@@ -363,23 +688,44 @@ def submit_query(
     if filter_edition != "All Editions":
         params["filter_edition"] = filter_edition
 
-    # Stream response with thinking support
+    # NEW: Add character context if available
+    try:
+        if active_char:
+            # Get character context for the query
+            context_response = char_api.get_character_query_context(active_char['id'])
+            if not context_response.get('error'):
+                character_context = context_response.get('context', '')
+                if character_context:
+                    params["character_context"] = character_context
+                    logger.info(f"Added character context: {character_context}")
+    except Exception as e:
+        logger.warning(f"Failed to get character context: {e}")
+        # Continue without character context
+
+    # Stream response with thinking support (existing code continues unchanged...)
     for response, thinking, metadata, status in client.query_stream(question, **params):
         if status == "error":
             yield response, "", "", [], gr.update(visible=False)
         elif status == "complete" and metadata:
-            # Format sources
+            # Format sources (existing code)
             sources_text = ""
             if metadata.get("sources"):
                 sources_list = [Path(s).name for s in metadata["sources"]]
                 sources_text = "**Sources:**\n" + "\n".join([f"📄 {s}" for s in sources_list])
 
-            # Show applied filters for debugging
+            # NEW: Add character info to sources if used
+            try:
+                if active_char and params.get("character_context"):
+                    sources_text += f"\n\n**Character:** {active_char['name']} ({active_char['metatype']})"
+            except:
+                pass
+
+            # Show applied filters for debugging (existing code)
             if metadata.get("applied_filters"):
                 filters_text = f"\n\n**Applied Filters:** {metadata['applied_filters']}"
                 sources_text += filters_text
 
-            # Create chunks dataframe
+            # Create chunks dataframe (existing code)
             chunks_data = []
             if metadata.get("chunks"):
                 for i, (chunk, dist) in enumerate(zip(
@@ -390,12 +736,12 @@ def submit_query(
                     content = chunk[:200] + "..." if len(chunk) > 200 else chunk
                     chunks_data.append([relevance, content])
 
-            # Show thinking accordion if there's thinking content
+            # Show thinking accordion if there's thinking content (existing code)
             thinking_visible = bool(thinking and thinking.strip())
 
             yield response, thinking, sources_text, chunks_data, gr.update(visible=thinking_visible)
         else:
-            # Still generating - show thinking accordion if content exists
+            # Still generating (existing code)
             thinking_visible = bool(thinking and thinking.strip())
             cursor = "▌" if status == "generating" else "🤔" if status == "thinking" else ""
             yield response + cursor, thinking, "", [], gr.update(visible=thinking_visible)
@@ -708,6 +1054,1524 @@ def reindex_documents(force_reindex: bool):
     return "✅ Enhanced reindexing complete with metadata extraction!"
 
 
+def refresh_character_list():
+    """Refresh the character list dropdown."""
+    characters = char_api.list_characters()
+
+    if not characters:
+        return gr.update(choices=["No characters"], value=None), "No characters found. Create one below!"
+
+    # Format choices
+    choices = []
+    active_char = char_api.get_active_character()
+    active_id = active_char.get("id") if active_char else None
+
+    for char in characters:
+        label = f"👤 {char['name']} ({char['metatype']})"
+        if char['id'] == active_id:
+            label += " ⭐"
+        choices.append((label, char['id']))
+
+    return gr.update(choices=choices, value=active_id), f"Found {len(characters)} characters"
+
+
+def create_new_character(name: str, metatype: str, archetype: str):
+    """Create a new character."""
+    if not name.strip():
+        return "❌ Character name is required", gr.update(), ""
+
+    result = char_api.create_character(name.strip(), metatype, archetype.strip())
+
+    if "error" in result:
+        return f"❌ Failed to create character: {result['error']}", gr.update(), ""
+
+    # Refresh character list
+    char_dropdown, status = refresh_character_list()
+
+    return f"✅ Character '{name}' created successfully!", char_dropdown, ""
+
+
+def select_character(character_id):
+    """Load character data when selected."""
+    global selected_character_id, character_data_cache
+
+    if not character_id:
+        return "No character selected", {}, {}, [], [], [], [], [], [], {}
+
+    selected_character_id = character_id
+
+    # Get character data
+    char_data = char_api.get_character(character_id)
+    if "error" in char_data:
+        return f"❌ Error loading character: {char_data['error']}", {}, {}, [], [], [], [], [], [], {}
+
+    character_data_cache[character_id] = char_data
+
+    # Extract data for forms
+    stats = char_data.get('stats', {})
+    resources = char_data.get('resources', {})
+
+    # Format skills for display
+    skills_display = []
+    for skill_type, skills in char_data.get('skills', {}).items():
+        for skill in skills:
+            dice_pool = 0
+            if skill.get('attribute') and stats:
+                attr_val = stats.get(skill['attribute'].lower(), 0)
+                dice_pool = attr_val + skill.get('rating', 0)
+
+            skills_display.append([
+                skill['name'], skill.get('rating', 0),
+                skill.get('specialization', ''), skill_type, dice_pool
+            ])
+
+    # Format other data for display
+    qualities_display = [[q['name'], q.get('rating', ''), q.get('quality_type', '')]
+                         for q in char_data.get('qualities', [])]
+
+    gear_display = [[g['name'], g.get('quantity', 1), g.get('category', ''), g.get('armor_value', 0)]
+                    for g in char_data.get('gear', [])]
+
+    weapons_display = [[w['name'], w.get('weapon_type', ''), w.get('damage_code', ''), w.get('armor_penetration', 0)]
+                       for w in char_data.get('weapons', [])]
+
+    vehicles_display = [[v['name'], v.get('vehicle_type', ''), v.get('handling', 0), v.get('speed', 0)]
+                        for v in char_data.get('vehicles', [])]
+
+    programs_display = [[p['name'], p.get('rating', 1), p.get('program_type', '')]
+                        for p in char_data.get('programs', [])]
+
+    cyberdeck = char_data.get('cyberdeck', {})
+
+    return (
+        f"✅ Loaded character: {char_data['name']}",
+        stats, resources, skills_display, qualities_display,
+        gear_display, weapons_display, vehicles_display, programs_display, cyberdeck
+    )
+
+
+def set_active_character(character_id):
+    """Set the active character for queries."""
+    if not character_id:
+        return "No character selected"
+
+    result = char_api.set_active_character(character_id)
+    if "error" in result:
+        return f"❌ Failed to set active character: {result['error']}"
+
+    return f"✅ {result['message']}"
+
+
+def delete_selected_character(character_id):
+    """Delete the selected character."""
+    if not character_id:
+        return "No character selected", gr.update()
+
+    # Get character name first
+    char_data = character_data_cache.get(character_id, {})
+    char_name = char_data.get('name', f'Character {character_id}')
+
+    result = char_api.delete_character(character_id)
+    if "error" in result:
+        return f"❌ Failed to delete character: {result['error']}", gr.update()
+
+    # Refresh character list
+    char_dropdown, _ = refresh_character_list()
+
+    return f"✅ Character '{char_name}' deleted successfully!", char_dropdown
+
+
+# ===== STATS & RESOURCES FUNCTIONS =====
+
+def update_character_stats(character_id, body, agility, reaction, strength, charisma, logic,
+                           intuition, willpower, edge, essence, physical_limit, mental_limit,
+                           social_limit, initiative, hot_sim_vr):
+    """Update character statistics."""
+    if not character_id:
+        return "No character selected"
+
+    stats_data = {
+        "body": body, "agility": agility, "reaction": reaction, "strength": strength,
+        "charisma": charisma, "logic": logic, "intuition": intuition, "willpower": willpower,
+        "edge": edge, "essence": essence, "physical_limit": physical_limit,
+        "mental_limit": mental_limit, "social_limit": social_limit,
+        "initiative": initiative, "hot_sim_vr": hot_sim_vr
+    }
+
+    result = char_api.update_character_stats(character_id, stats_data)
+    if "error" in result:
+        return f"❌ Failed to update stats: {result['error']}"
+
+    return "✅ Character stats updated successfully!"
+
+
+def update_character_resources(character_id, nuyen, street_cred, notoriety, public_aware,
+                               total_karma, available_karma, edge_pool):
+    """Update character resources."""
+    if not character_id:
+        return "No character selected"
+
+    resources_data = {
+        "nuyen": nuyen, "street_cred": street_cred, "notoriety": notoriety,
+        "public_aware": public_aware, "total_karma": total_karma,
+        "available_karma": available_karma, "edge_pool": edge_pool
+    }
+
+    result = char_api.update_character_resources(character_id, resources_data)
+    if "error" in result:
+        return f"❌ Failed to update resources: {result['error']}"
+
+    return "✅ Character resources updated successfully!"
+
+
+# ===== SKILLS FUNCTIONS =====
+
+def get_skills_for_dropdown(skill_type: str):
+    """Get skills from library for dropdown - IMPROVED VERSION."""
+    skills = char_api.get_skills_library(skill_type)
+
+    if not skills:
+        return gr.update(choices=[("No skills found - run 'Populate Reference Data'", None)], value=None)
+
+    choices = []
+    for skill in skills:
+        # Create descriptive choice text
+        attr_text = f" ({skill.get('linked_attribute', 'Unknown')})" if skill.get('linked_attribute') else ""
+        choice_text = f"{skill['name']}{attr_text}"
+        choices.append((choice_text, skill['name']))
+
+    return gr.update(choices=choices, value=None)
+
+
+def add_character_skill(character_id, skill_name, rating, specialization, skill_type, current_skills):
+    """Add a skill to the character."""
+    if not character_id or not skill_name:
+        return "No character or skill selected", current_skills
+
+    # Get skill details from library
+    skills_library = char_api.get_skills_library(skill_type)
+    skill_info = next((s for s in skills_library if s['name'] == skill_name), {})
+
+    skill_data = {
+        "name": skill_name,
+        "rating": rating,
+        "specialization": specialization,
+        "skill_type": skill_type,
+        "skill_group": skill_info.get('skill_group', ''),
+        "attribute": skill_info.get('linked_attribute', '')
+    }
+
+    result = char_api.add_character_skill(character_id, skill_data)
+    if "error" in result:
+        return f"❌ Failed to add skill: {result['error']}", current_skills
+
+    # Add to current skills display
+    new_skills = current_skills + [[skill_name, rating, specialization, skill_type, rating]]
+
+    return f"✅ Skill '{skill_name}' added successfully!", new_skills
+
+
+def remove_character_skill(character_id, selected_skill_index, current_skills):
+    """Remove a skill from the character."""
+    if not character_id or selected_skill_index is None or not current_skills:
+        return "No character or skill selected", current_skills
+
+    try:
+        skill_name = current_skills[selected_skill_index][0]
+
+        result = char_api.remove_character_skill(character_id, skill_name)
+        if "error" in result:
+            return f"❌ Failed to remove skill: {result['error']}", current_skills
+
+        # Remove from display
+        updated_skills = [skill for i, skill in enumerate(current_skills) if i != selected_skill_index]
+
+        return f"✅ Skill '{skill_name}' removed successfully!", updated_skills
+    except (IndexError, KeyError) as e:
+        return f"❌ Error removing skill: {str(e)}", current_skills
+
+
+# ===== QUALITIES FUNCTIONS =====
+
+def get_qualities_for_dropdown(quality_type: str):
+    """Get qualities from library for dropdown - IMPROVED VERSION."""
+    qualities = char_api.get_qualities_library(quality_type)
+
+    if not qualities:
+        return gr.update(choices=[("No qualities found - run 'Populate Reference Data'", None)], value=None)
+
+    choices = []
+    for quality in qualities:
+        # Create descriptive choice text with karma cost
+        karma_cost = quality.get('karma_cost', 0)
+        karma_text = f" ({karma_cost} karma)" if karma_cost != 0 else ""
+        choice_text = f"{quality['name']}{karma_text}"
+        choices.append((choice_text, quality['name']))
+
+    return gr.update(choices=choices, value=None)
+
+
+def add_character_quality(character_id, quality_name, rating, quality_type, current_qualities):
+    """Add a quality to the character."""
+    if not character_id or not quality_name:
+        return "No character or quality selected", current_qualities
+
+    # Get quality details from library
+    qualities_library = char_api.get_qualities_library(quality_type)
+    quality_info = next((q for q in qualities_library if q['name'] == quality_name), {})
+
+    quality_data = {
+        "name": quality_name,
+        "rating": rating,
+        "quality_type": quality_type,
+        "karma_cost": quality_info.get('karma_cost', 0),
+        "description": quality_info.get('description', '')
+    }
+
+    result = char_api.add_character_quality(character_id, quality_data)
+    if "error" in result:
+        return f"❌ Failed to add quality: {result['error']}", current_qualities
+
+    # Add to current qualities display
+    new_qualities = current_qualities + [[quality_name, rating, quality_type]]
+
+    return f"✅ Quality '{quality_name}' added successfully!", new_qualities
+
+
+def remove_character_quality(character_id, selected_quality_index, current_qualities):
+    """Remove a quality from the character."""
+    if not character_id or selected_quality_index is None or not current_qualities:
+        return "No character or quality selected", current_qualities
+
+    try:
+        quality_name = current_qualities[selected_quality_index][0]
+
+        result = char_api.remove_character_quality(character_id, quality_name)
+        if "error" in result:
+            return f"❌ Failed to remove quality: {result['error']}", current_qualities
+
+        # Remove from display
+        updated_qualities = [q for i, q in enumerate(current_qualities) if i != selected_quality_index]
+
+        return f"✅ Quality '{quality_name}' removed successfully!", updated_qualities
+    except (IndexError, KeyError) as e:
+        return f"❌ Error removing quality: {str(e)}", current_qualities
+
+
+# ===== GEAR FUNCTIONS =====
+
+def get_gear_for_dropdown(category: str):
+    """Get gear from library for dropdown - IMPROVED VERSION."""
+    if not category:
+        return gr.update(choices=[], value=None)
+
+    gear_items = char_api.get_gear_library(category)
+
+    if not gear_items:
+        return gr.update(choices=[("No gear found in this category", None)], value=None)
+
+    choices = []
+    for gear in gear_items:
+        # Create descriptive choice text with cost
+        cost = gear.get('base_cost', 0)
+        cost_text = f" ({cost}¥)" if cost > 0 else ""
+        choice_text = f"{gear['name']}{cost_text}"
+        choices.append((choice_text, gear['name']))
+
+    return gr.update(choices=choices, value=None)
+
+
+def add_character_gear(character_id, gear_name, category, quantity, rating, current_gear):
+    """Add gear to the character."""
+    if not character_id or not gear_name:
+        return "No character or gear selected", current_gear
+
+    # Get gear details from library
+    gear_library = char_api.get_gear_library(category)
+    gear_info = next((g for g in gear_library if g['name'] == gear_name), {})
+
+    gear_data = {
+        "name": gear_name,
+        "category": category,
+        "subcategory": gear_info.get('subcategory', ''),
+        "quantity": quantity,
+        "rating": rating,
+        "armor_value": gear_info.get('armor_value', 0),
+        "cost": gear_info.get('base_cost', 0),
+        "availability": gear_info.get('availability', ''),
+        "description": gear_info.get('description', '')
+    }
+
+    result = char_api.add_character_gear(character_id, gear_data)
+    if "error" in result:
+        return f"❌ Failed to add gear: {result['error']}", current_gear
+
+    # Add to current gear display
+    new_gear = current_gear + [[gear_name, quantity, category, gear_info.get('armor_value', 0)]]
+
+    return f"✅ Gear '{gear_name}' added successfully!", new_gear
+
+
+# ===== WEAPONS FUNCTIONS =====
+
+def add_character_weapon(character_id, weapon_name, weapon_type, mode_ammo, accuracy,
+                         damage_code, armor_penetration, recoil_compensation, current_weapons):
+    """Add a weapon to the character."""
+    if not character_id or not weapon_name:
+        return "No character or weapon name provided", current_weapons
+
+    weapon_data = {
+        "name": weapon_name,
+        "weapon_type": weapon_type,
+        "mode_ammo": mode_ammo,
+        "accuracy": accuracy,
+        "damage_code": damage_code,
+        "armor_penetration": armor_penetration,
+        "recoil_compensation": recoil_compensation,
+        "cost": 0,  # Could add cost input if needed
+        "availability": "",
+        "description": ""
+    }
+
+    result = char_api.add_character_weapon(character_id, weapon_data)
+    if "error" in result:
+        return f"❌ Failed to add weapon: {result['error']}", current_weapons
+
+    # Add to current weapons display
+    new_weapons = current_weapons + [[weapon_name, weapon_type, damage_code, armor_penetration]]
+
+    return f"✅ Weapon '{weapon_name}' added successfully!", new_weapons
+
+
+def remove_character_weapon(character_id, selected_weapon_index, current_weapons):
+    """Remove a weapon from the character."""
+    if not character_id or selected_weapon_index is None or not current_weapons:
+        return "No character or weapon selected", current_weapons
+
+    try:
+        # Note: This is a limitation - we need the actual weapon ID from the database
+        # For now, we'll use the weapon name and let the backend handle it
+        weapon_name = current_weapons[selected_weapon_index][0]
+
+        # This would need to be modified to use actual weapon IDs
+        # For now, this is a placeholder that shows the pattern
+        result = {"message": f"Weapon removal not fully implemented yet"}
+
+        # Remove from display (optimistic update)
+        updated_weapons = [w for i, w in enumerate(current_weapons) if i != selected_weapon_index]
+
+        return f"⚠️ Weapon '{weapon_name}' removed from display (backend removal needs weapon ID)", updated_weapons
+    except (IndexError, KeyError) as e:
+        return f"❌ Error removing weapon: {str(e)}", current_weapons
+
+
+# ===== VEHICLES FUNCTIONS =====
+
+def add_character_vehicle(character_id, vehicle_name, vehicle_type, handling, speed,
+                          acceleration, body, armor, pilot, sensor, seats, current_vehicles):
+    """Add a vehicle/drone to the character."""
+    if not character_id or not vehicle_name:
+        return "No character or vehicle name provided", current_vehicles
+
+    vehicle_data = {
+        "name": vehicle_name,
+        "vehicle_type": vehicle_type,
+        "handling": handling,
+        "speed": speed,
+        "acceleration": acceleration,
+        "body": body,
+        "armor": armor,
+        "pilot": pilot,
+        "sensor": sensor,
+        "seats": seats,
+        "cost": 0,
+        "availability": "",
+        "description": ""
+    }
+
+    result = char_api.add_character_vehicle(character_id, vehicle_data)
+    if "error" in result:
+        return f"❌ Failed to add vehicle: {result['error']}", current_vehicles
+
+    # Add to current vehicles display
+    new_vehicles = current_vehicles + [[vehicle_name, vehicle_type, handling, speed]]
+
+    return f"✅ Vehicle '{vehicle_name}' added successfully!", new_vehicles
+
+
+def remove_character_vehicle(character_id, selected_vehicle_index, current_vehicles):
+    """Remove a vehicle from the character."""
+    if not character_id or selected_vehicle_index is None or not current_vehicles:
+        return "No character or vehicle selected", current_vehicles
+
+    try:
+        vehicle_name = current_vehicles[selected_vehicle_index][0]
+
+        # Similar limitation as weapons - needs actual vehicle ID
+        result = {"message": f"Vehicle removal not fully implemented yet"}
+
+        # Remove from display (optimistic update)
+        updated_vehicles = [v for i, v in enumerate(current_vehicles) if i != selected_vehicle_index]
+
+        return f"⚠️ Vehicle '{vehicle_name}' removed from display (backend removal needs vehicle ID)", updated_vehicles
+    except (IndexError, KeyError) as e:
+        return f"❌ Error removing vehicle: {str(e)}", current_vehicles
+
+
+# ===== PROGRAMS FUNCTIONS =====
+
+def add_character_program(character_id, program_name, program_rating, program_type, current_programs):
+    """Add a program to character's cyberdeck."""
+    if not character_id or not program_name:
+        return "No character or program name provided", current_programs
+
+    program_data = {
+        "name": program_name,
+        "rating": program_rating,
+        "program_type": program_type,
+        "description": ""
+    }
+
+    result = char_api.add_character_program(character_id, program_data)
+    if "error" in result:
+        return f"❌ Failed to add program: {result['error']}", current_programs
+
+    # Add to current programs display
+    new_programs = current_programs + [[program_name, program_rating, program_type]]
+
+    return f"✅ Program '{program_name}' added successfully!", new_programs
+
+
+def remove_character_program(character_id, selected_program_index, current_programs):
+    """Remove a program from the character."""
+    if not character_id or selected_program_index is None or not current_programs:
+        return "No character or program selected", current_programs
+
+    try:
+        program_name = current_programs[selected_program_index][0]
+
+        # Similar limitation - needs actual program ID
+        result = {"message": f"Program removal not fully implemented yet"}
+
+        # Remove from display (optimistic update)
+        updated_programs = [p for i, p in enumerate(current_programs) if i != selected_program_index]
+
+        return f"⚠️ Program '{program_name}' removed from display (backend removal needs program ID)", updated_programs
+    except (IndexError, KeyError) as e:
+        return f"❌ Error removing program: {str(e)}", current_programs
+
+
+# ===== CYBERDECK FUNCTIONS =====
+
+def update_character_cyberdeck(character_id, deck_name, device_rating, attack, sleaze,
+                               firewall, data_processing, matrix_damage):
+    """Update character's cyberdeck."""
+    if not character_id:
+        return "No character selected"
+
+    cyberdeck_data = {
+        "name": deck_name,
+        "device_rating": device_rating,
+        "attack": attack,
+        "sleaze": sleaze,
+        "firewall": firewall,
+        "data_processing": data_processing,
+        "matrix_damage": matrix_damage,
+        "cost": 0,
+        "availability": "",
+        "description": ""
+    }
+
+    result = char_api.update_character_cyberdeck(character_id, cyberdeck_data)
+    if "error" in result:
+        return f"❌ Failed to update cyberdeck: {result['error']}"
+
+    return "✅ Cyberdeck updated successfully!"
+
+
+# ===== EXPORT FUNCTIONS =====
+
+def export_character_for_gm(character_id):
+    """Export character data for GM."""
+    if not character_id:
+        return "No character selected"
+
+    try:
+        json_data = char_api.export_character_json(character_id)
+        if json_data:
+            # Save to temporary file for download
+            import tempfile
+            import os
+
+            char_data = character_data_cache.get(character_id, {})
+            char_name = char_data.get('name', 'character').replace(' ', '_')
+
+            temp_file = tempfile.NamedTemporaryFile(
+                mode='wb',
+                suffix=f'_{char_name}.json',
+                delete=False
+            )
+            temp_file.write(json_data)
+            temp_file.close()
+
+            return f"✅ Character exported successfully! Download: {temp_file.name}"
+        else:
+            return "❌ Failed to export character data"
+    except Exception as e:
+        return f"❌ Export error: {str(e)}"
+
+
+def populate_reference_tables():
+    """Populate reference tables from rulebooks."""
+    result = char_api.populate_reference_data()
+    if "error" in result:
+        return f"❌ Failed to populate reference data: {result['error']}"
+
+    return "✅ Reference tables populated from rulebooks successfully!"
+
+
+# ===== CHARACTER SELECTOR FOR QUERY TAB =====
+
+def get_character_selector_choices():
+    """Get character choices for the query tab dropdown."""
+    characters = char_api.list_characters()
+    if not characters:
+        return gr.update(choices=["None"], value="None")
+
+    choices = ["None"] + [f"{char['name']} ({char['metatype']})" for char in characters]
+
+    # Set active character as default
+    active_char = char_api.get_active_character()
+    default_value = "None"
+    if active_char:
+        default_value = f"{active_char['name']} ({active_char['metatype']})"
+
+    return gr.update(choices=choices, value=default_value)
+
+
+def handle_character_selection_for_query(character_choice):
+    """Handle character selection in query tab."""
+    if character_choice == "None":
+        return "No character selected for queries"
+
+    # Find character by name
+    characters = char_api.list_characters()
+    selected_char = None
+    for char in characters:
+        if f"{char['name']} ({char['metatype']})" == character_choice:
+            selected_char = char
+            break
+
+    if not selected_char:
+        return "Character not found"
+
+    # Set as active
+    result = char_api.set_active_character(selected_char['id'])
+    if "error" in result:
+        return f"Failed to set active character: {result['error']}"
+
+    return f"Active character: {selected_char['name']} - queries will include character context"
+
+
+# ===== CHARACTER MANAGEMENT TAB BUILDER =====
+
+def build_character_management_tab():
+    """Build the complete character management tab with all sub-sections."""
+
+    with gr.Tab("👤 Characters"):
+        # Character selection and management header
+        with gr.Row():
+            with gr.Column(scale=1):
+                gr.Markdown("### 🎭 Character Management")
+
+                # Character selection dropdown
+                character_selector = gr.Dropdown(
+                    label="Select Character",
+                    choices=[("No characters", None)],
+                    value=None,
+                    interactive=True
+                )
+
+                with gr.Row():
+                    refresh_btn = gr.Button("🔄 Refresh", size="sm")
+                    set_active_btn = gr.Button("⭐ Set Active", variant="primary", size="sm")
+                    delete_btn = gr.Button("🗑️ Delete", variant="stop", size="sm")
+
+                character_status = gr.Markdown("Ready to manage characters")
+
+                # Character creation section
+                with gr.Accordion("➕ Create New Character", open=False):
+                    new_char_name = gr.Textbox(label="Character Name", placeholder="Enter character name")
+
+                    with gr.Row():
+                        new_char_metatype = gr.Dropdown(
+                            label="Metatype",
+                            choices=["Human", "Elf", "Dwarf", "Ork", "Troll"],
+                            value="Human"
+                        )
+                        new_char_archetype = gr.Textbox(
+                            label="Archetype",
+                            placeholder="e.g., Street Samurai, Decker"
+                        )
+
+                    create_btn = gr.Button("➕ Create Character", variant="primary")
+                    create_status = gr.Textbox(label="Creation Status", interactive=False, lines=2)
+
+        # Character details in tabbed interface
+        with gr.Column(scale=3):
+            with gr.Tabs():
+                # ===== STATS & RESOURCES TAB =====
+                with gr.Tab("📊 Stats & Resources"):
+                    with gr.Row():
+                        # Attributes
+                        with gr.Column():
+                            gr.Markdown("#### 🏋️ Attributes")
+
+                            with gr.Row():
+                                body_input = gr.Number(label="Body", value=1, minimum=1, maximum=12)
+                                agility_input = gr.Number(label="Agility", value=1, minimum=1, maximum=12)
+                                reaction_input = gr.Number(label="Reaction", value=1, minimum=1, maximum=12)
+
+                            with gr.Row():
+                                strength_input = gr.Number(label="Strength", value=1, minimum=1, maximum=12)
+                                charisma_input = gr.Number(label="Charisma", value=1, minimum=1, maximum=12)
+                                logic_input = gr.Number(label="Logic", value=1, minimum=1, maximum=12)
+
+                            with gr.Row():
+                                intuition_input = gr.Number(label="Intuition", value=1, minimum=1, maximum=12)
+                                willpower_input = gr.Number(label="Willpower", value=1, minimum=1, maximum=12)
+                                edge_input = gr.Number(label="Edge", value=1, minimum=1, maximum=7)
+
+                            essence_input = gr.Number(label="Essence", value=6.0, minimum=0, maximum=6, step=0.01)
+
+                        # Limits and Matrix
+                        with gr.Column():
+                            gr.Markdown("#### 🎯 Limits & Initiative")
+
+                            physical_limit_input = gr.Number(label="Physical Limit", value=1, minimum=1)
+                            mental_limit_input = gr.Number(label="Mental Limit", value=1, minimum=1)
+                            social_limit_input = gr.Number(label="Social Limit", value=1, minimum=1)
+                            initiative_input = gr.Number(label="Initiative", value=1, minimum=1)
+                            hot_sim_vr_input = gr.Number(label="Hot Sim VR", value=0, minimum=0)
+
+                    with gr.Row():
+                        # Resources
+                        with gr.Column():
+                            gr.Markdown("#### 💰 Resources")
+
+                            with gr.Row():
+                                nuyen_input = gr.Number(label="Nuyen", value=0, minimum=0)
+                                street_cred_input = gr.Number(label="Street Cred", value=0, minimum=0)
+
+                            with gr.Row():
+                                notoriety_input = gr.Number(label="Notoriety", value=0, minimum=0)
+                                public_aware_input = gr.Number(label="Public Aware", value=0, minimum=0)
+
+                            with gr.Row():
+                                total_karma_input = gr.Number(label="Total Karma", value=0, minimum=0)
+                                available_karma_input = gr.Number(label="Available Karma", value=0, minimum=0)
+                                edge_pool_input = gr.Number(label="Edge Pool", value=1, minimum=1)
+
+                    # Update buttons
+                    with gr.Row():
+                        update_stats_btn = gr.Button("💾 Save Stats", variant="primary")
+                        update_resources_btn = gr.Button("💾 Save Resources", variant="primary")
+
+                    stats_update_status = gr.Textbox(label="Update Status", interactive=False)
+
+                # ===== SKILLS TAB =====
+                with gr.Tab("🎯 Skills"):
+                    with gr.Row():
+                        # Current skills display
+                        with gr.Column(scale=2):
+                            gr.Markdown("#### 📋 Current Skills")
+
+                            skills_table = gr.Dataframe(
+                                headers=["Skill", "Rating", "Specialization", "Type", "Dice Pool"],
+                                datatype=["str", "number", "str", "str", "number"],
+                                value=[],
+                                interactive=False,
+                                label="Character Skills"
+                            )
+
+                            with gr.Row():
+                                remove_skill_btn = gr.Button("🗑️ Remove Selected", variant="secondary")
+                                selected_skill_index = gr.State()
+
+                        # Add skills interface
+                        with gr.Column(scale=1):
+                            gr.Markdown("#### ➕ Add Skills")
+
+                            skill_type_selector = gr.Radio(
+                                label="Skill Type",
+                                choices=["active", "knowledge", "language"],
+                                value="active"
+                            )
+
+                            skill_dropdown = gr.Dropdown(
+                                label="Select Skill",
+                                choices=[],
+                                interactive=True
+                            )
+
+                            skill_rating_input = gr.Number(
+                                label="Rating",
+                                value=1,
+                                minimum=1,
+                                maximum=12
+                            )
+
+                            skill_specialization_input = gr.Textbox(
+                                label="Specialization",
+                                placeholder="Optional specialization"
+                            )
+
+                            add_skill_btn = gr.Button("➕ Add Skill", variant="primary")
+
+                            skills_status = gr.Textbox(label="Skills Status", interactive=False, lines=3)
+
+                # ===== QUALITIES TAB =====
+                with gr.Tab("⭐ Qualities"):
+                    with gr.Row():
+                        # Current qualities display
+                        with gr.Column(scale=2):
+                            gr.Markdown("#### 📋 Current Qualities")
+
+                            qualities_table = gr.Dataframe(
+                                headers=["Quality", "Rating", "Type"],
+                                datatype=["str", "str", "str"],
+                                value=[],
+                                interactive=False,
+                                label="Character Qualities"
+                            )
+
+                            with gr.Row():
+                                remove_quality_btn = gr.Button("🗑️ Remove Selected", variant="secondary")
+                                selected_quality_index = gr.State()
+
+                        # Add qualities interface
+                        with gr.Column(scale=1):
+                            gr.Markdown("#### ➕ Add Qualities")
+
+                            quality_type_selector = gr.Radio(
+                                label="Quality Type",
+                                choices=["positive", "negative"],
+                                value="positive"
+                            )
+
+                            quality_dropdown = gr.Dropdown(
+                                label="Select Quality",
+                                choices=[],
+                                interactive=True
+                            )
+
+                            quality_rating_input = gr.Number(
+                                label="Rating",
+                                value=0,
+                                minimum=0,
+                                maximum=6
+                            )
+
+                            add_quality_btn = gr.Button("➕ Add Quality", variant="primary")
+
+                            qualities_status = gr.Textbox(label="Qualities Status", interactive=False, lines=3)
+
+                # ===== GEAR TAB =====
+                with gr.Tab("🎒 Gear"):
+                    with gr.Row():
+                        # Current gear display
+                        with gr.Column(scale=2):
+                            gr.Markdown("#### 📋 Current Gear")
+
+                            gear_table = gr.Dataframe(
+                                headers=["Item", "Quantity", "Category", "Armor"],
+                                datatype=["str", "number", "str", "number"],
+                                value=[],
+                                interactive=False,
+                                label="Character Gear"
+                            )
+
+                            with gr.Row():
+                                remove_gear_btn = gr.Button("🗑️ Remove Selected", variant="secondary")
+                                total_armor_display = gr.Number(
+                                    label="Total Armor",
+                                    value=0,
+                                    interactive=False
+                                )
+
+                        # Add gear interface
+                        with gr.Column(scale=1):
+                            gr.Markdown("#### ➕ Add Gear")
+
+                            gear_category_selector = gr.Dropdown(
+                                label="Category",
+                                choices=[]
+                            )
+
+                            gear_dropdown = gr.Dropdown(
+                                label="Select Gear",
+                                choices=[],
+                                interactive=True
+                            )
+
+                            gear_quantity_input = gr.Number(
+                                label="Quantity",
+                                value=1,
+                                minimum=1
+                            )
+
+                            gear_rating_input = gr.Number(
+                                label="Rating",
+                                value=0,
+                                minimum=0,
+                                maximum=6
+                            )
+
+                            add_gear_btn = gr.Button("➕ Add Gear", variant="primary")
+
+                            gear_status = gr.Textbox(label="Gear Status", interactive=False, lines=3)
+
+                # ===== ENHANCED WEAPONS TAB =====
+                def create_enhanced_weapons_tab():
+                    """Enhanced weapons tab with add/remove functionality."""
+                    with gr.Tab("⚔️ Weapons"):
+                        with gr.Row():
+                            # Current weapons display
+                            with gr.Column(scale=2):
+                                gr.Markdown("#### 🗡️ Current Weapons")
+
+                                weapons_table = gr.Dataframe(
+                                    headers=["Weapon", "Type", "Damage", "AP"],
+                                    datatype=["str", "str", "str", "number"],
+                                    value=[],
+                                    interactive=False,
+                                    label="Character Weapons"
+                                )
+
+                                with gr.Row():
+                                    remove_weapon_btn = gr.Button("🗑️ Remove Selected", variant="secondary")
+
+                            # Add weapons interface
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### ➕ Add Weapon")
+
+                                weapon_name_input = gr.Textbox(
+                                    label="Weapon Name",
+                                    placeholder="Enter weapon name"
+                                )
+
+                                weapon_type_selector = gr.Radio(
+                                    label="Weapon Type",
+                                    choices=["melee", "ranged"],
+                                    value="ranged"
+                                )
+
+                                with gr.Row():
+                                    weapon_accuracy_input = gr.Number(
+                                        label="Accuracy",
+                                        value=0,
+                                        minimum=0,
+                                        maximum=10
+                                    )
+                                    weapon_ap_input = gr.Number(
+                                        label="AP",
+                                        value=0,
+                                        minimum=-10,
+                                        maximum=0
+                                    )
+
+                                weapon_damage_input = gr.Textbox(
+                                    label="Damage Code",
+                                    placeholder="e.g., 8P, 6S+1"
+                                )
+
+                                weapon_mode_input = gr.Textbox(
+                                    label="Mode/Ammo",
+                                    placeholder="e.g., SA, BF/FA, 30(c)"
+                                )
+
+                                weapon_rc_input = gr.Number(
+                                    label="Recoil Comp",
+                                    value=0,
+                                    minimum=0,
+                                    maximum=10
+                                )
+
+                                add_weapon_btn = gr.Button("➕ Add Weapon", variant="primary")
+
+                        weapons_status = gr.Textbox(label="Weapons Status", interactive=False, lines=2)
+
+                    return {
+                        "weapons_table": weapons_table,
+                        "weapon_name_input": weapon_name_input,
+                        "weapon_type_selector": weapon_type_selector,
+                        "weapon_accuracy_input": weapon_accuracy_input,
+                        "weapon_ap_input": weapon_ap_input,
+                        "weapon_damage_input": weapon_damage_input,
+                        "weapon_mode_input": weapon_mode_input,
+                        "weapon_rc_input": weapon_rc_input,
+                        "add_weapon_btn": add_weapon_btn,
+                        "remove_weapon_btn": remove_weapon_btn,
+                        "weapons_status": weapons_status
+                    }
+
+                # ===== ENHANCED VEHICLES TAB =====
+                def create_enhanced_vehicles_tab():
+                    """Enhanced vehicles tab with add/remove functionality."""
+                    with gr.Tab("🚗 Vehicles"):
+                        with gr.Row():
+                            # Current vehicles display
+                            with gr.Column(scale=2):
+                                gr.Markdown("#### 🚗 Vehicles & Drones")
+
+                                vehicles_table = gr.Dataframe(
+                                    headers=["Vehicle", "Type", "Handling", "Speed"],
+                                    datatype=["str", "str", "number", "number"],
+                                    value=[],
+                                    interactive=False,
+                                    label="Character Vehicles"
+                                )
+
+                                with gr.Row():
+                                    remove_vehicle_btn = gr.Button("🗑️ Remove Selected", variant="secondary")
+
+                            # Add vehicles interface
+                            with gr.Column(scale=1):
+                                gr.Markdown("#### ➕ Add Vehicle")
+
+                                vehicle_name_input = gr.Textbox(
+                                    label="Vehicle Name",
+                                    placeholder="Enter vehicle/drone name"
+                                )
+
+                                vehicle_type_selector = gr.Radio(
+                                    label="Type",
+                                    choices=["vehicle", "drone"],
+                                    value="vehicle"
+                                )
+
+                                with gr.Row():
+                                    vehicle_handling_input = gr.Number(
+                                        label="Handling",
+                                        value=0,
+                                        minimum=-5,
+                                        maximum=5
+                                    )
+                                    vehicle_speed_input = gr.Number(
+                                        label="Speed",
+                                        value=0,
+                                        minimum=0,
+                                        maximum=300
+                                    )
+
+                                with gr.Row():
+                                    vehicle_accel_input = gr.Number(
+                                        label="Acceleration",
+                                        value=0,
+                                        minimum=0,
+                                        maximum=50
+                                    )
+                                    vehicle_body_input = gr.Number(
+                                        label="Body",
+                                        value=0,
+                                        minimum=0,
+                                        maximum=20
+                                    )
+
+                                with gr.Row():
+                                    vehicle_armor_input = gr.Number(
+                                        label="Armor",
+                                        value=0,
+                                        minimum=0,
+                                        maximum=20
+                                    )
+                                    vehicle_pilot_input = gr.Number(
+                                        label="Pilot",
+                                        value=0,
+                                        minimum=0,
+                                        maximum=6
+                                    )
+
+                                with gr.Row():
+                                    vehicle_sensor_input = gr.Number(
+                                        label="Sensor",
+                                        value=0,
+                                        minimum=0,
+                                        maximum=8
+                                    )
+                                    vehicle_seats_input = gr.Number(
+                                        label="Seats",
+                                        value=0,
+                                        minimum=0,
+                                        maximum=20
+                                    )
+
+                                add_vehicle_btn = gr.Button("➕ Add Vehicle", variant="primary")
+
+                        vehicles_status = gr.Textbox(label="Vehicles Status", interactive=False, lines=2)
+
+                    return {
+                        "vehicles_table": vehicles_table,
+                        "vehicle_name_input": vehicle_name_input,
+                        "vehicle_type_selector": vehicle_type_selector,
+                        "vehicle_handling_input": vehicle_handling_input,
+                        "vehicle_speed_input": vehicle_speed_input,
+                        "vehicle_accel_input": vehicle_accel_input,
+                        "vehicle_body_input": vehicle_body_input,
+                        "vehicle_armor_input": vehicle_armor_input,
+                        "vehicle_pilot_input": vehicle_pilot_input,
+                        "vehicle_sensor_input": vehicle_sensor_input,
+                        "vehicle_seats_input": vehicle_seats_input,
+                        "add_vehicle_btn": add_vehicle_btn,
+                        "remove_vehicle_btn": remove_vehicle_btn,
+                        "vehicles_status": vehicles_status
+                    }
+
+                def create_enhanced_matrix_tab():
+                    """Enhanced matrix tab with cyberdeck and programs."""
+                    with gr.Tab("🖥️ Matrix"):
+                        with gr.Row():
+                            # Cyberdeck
+                            with gr.Column():
+                                gr.Markdown("#### 🖥️ Cyberdeck")
+
+                                cyberdeck_name = gr.Textbox(label="Cyberdeck Name", placeholder="Enter cyberdeck name")
+                                cyberdeck_device_rating = gr.Number(label="Device Rating", value=1, minimum=1,
+                                                                    maximum=6)
+
+                                with gr.Row():
+                                    cyberdeck_attack = gr.Number(label="Attack", value=0, minimum=0, maximum=6)
+                                    cyberdeck_sleaze = gr.Number(label="Sleaze", value=0, minimum=0, maximum=6)
+
+                                with gr.Row():
+                                    cyberdeck_firewall = gr.Number(label="Firewall", value=0, minimum=0, maximum=6)
+                                    cyberdeck_data_proc = gr.Number(label="Data Processing", value=0, minimum=0,
+                                                                    maximum=6)
+
+                                cyberdeck_matrix_damage = gr.Number(label="Matrix Damage", value=0, minimum=0)
+
+                                update_cyberdeck_btn = gr.Button("💾 Save Cyberdeck", variant="primary")
+
+                            # Programs
+                            with gr.Column():
+                                gr.Markdown("#### 📱 Programs")
+
+                                programs_table = gr.Dataframe(
+                                    headers=["Program", "Rating", "Type"],
+                                    datatype=["str", "number", "str"],
+                                    value=[],
+                                    interactive=False,
+                                    label="Installed Programs"
+                                )
+
+                                with gr.Accordion("➕ Add Program", open=False):
+                                    program_name_input = gr.Textbox(
+                                        label="Program Name",
+                                        placeholder="Enter program name"
+                                    )
+
+                                    program_rating_input = gr.Number(
+                                        label="Rating",
+                                        value=1,
+                                        minimum=1,
+                                        maximum=6
+                                    )
+
+                                    program_type_selector = gr.Dropdown(
+                                        label="Program Type",
+                                        choices=["common", "hacking", "cybercombat", "data"],
+                                        value="common"
+                                    )
+
+                                    add_program_btn = gr.Button("➕ Add Program", variant="primary")
+
+                                with gr.Row():
+                                    remove_program_btn = gr.Button("🗑️ Remove Selected", variant="secondary")
+
+                        matrix_status = gr.Textbox(label="Matrix Status", interactive=False, lines=2)
+
+                    return {
+                        "cyberdeck_name": cyberdeck_name,
+                        "cyberdeck_device_rating": cyberdeck_device_rating,
+                        "cyberdeck_attack": cyberdeck_attack,
+                        "cyberdeck_sleaze": cyberdeck_sleaze,
+                        "cyberdeck_firewall": cyberdeck_firewall,
+                        "cyberdeck_data_proc": cyberdeck_data_proc,
+                        "cyberdeck_matrix_damage": cyberdeck_matrix_damage,
+                        "update_cyberdeck_btn": update_cyberdeck_btn,
+                        "programs_table": programs_table,
+                        "program_name_input": program_name_input,
+                        "program_rating_input": program_rating_input,
+                        "program_type_selector": program_type_selector,
+                        "add_program_btn": add_program_btn,
+                        "remove_program_btn": remove_program_btn,
+                        "matrix_status": matrix_status
+                    }
+
+        # Bottom section with utilities
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 🔧 Utilities")
+
+                with gr.Row():
+                    populate_ref_btn = gr.Button("📚 Populate Reference Data", variant="secondary")
+                    export_btn = gr.Button("📤 Export for GM", variant="primary")
+                    dice_pool_btn = gr.Button("🎲 Quick Dice Pool", variant="secondary")
+
+                utility_status = gr.Textbox(label="Utility Status", interactive=False, lines=2)
+
+    # Return all the components we need to wire up
+    return {
+        # Character management
+        "character_selector": character_selector,
+        "refresh_btn": refresh_btn,
+        "set_active_btn": set_active_btn,
+        "delete_btn": delete_btn,
+        "character_status": character_status,
+
+        # Character creation
+        "new_char_name": new_char_name,
+        "new_char_metatype": new_char_metatype,
+        "new_char_archetype": new_char_archetype,
+        "create_btn": create_btn,
+        "create_status": create_status,
+
+        # Stats inputs
+        "body_input": body_input,
+        "agility_input": agility_input,
+        "reaction_input": reaction_input,
+        "strength_input": strength_input,
+        "charisma_input": charisma_input,
+        "logic_input": logic_input,
+        "intuition_input": intuition_input,
+        "willpower_input": willpower_input,
+        "edge_input": edge_input,
+        "essence_input": essence_input,
+        "physical_limit_input": physical_limit_input,
+        "mental_limit_input": mental_limit_input,
+        "social_limit_input": social_limit_input,
+        "initiative_input": initiative_input,
+        "hot_sim_vr_input": hot_sim_vr_input,
+
+        # Resources inputs
+        "nuyen_input": nuyen_input,
+        "street_cred_input": street_cred_input,
+        "notoriety_input": notoriety_input,
+        "public_aware_input": public_aware_input,
+        "total_karma_input": total_karma_input,
+        "available_karma_input": available_karma_input,
+        "edge_pool_input": edge_pool_input,
+
+        # Update buttons and status
+        "update_stats_btn": update_stats_btn,
+        "update_resources_btn": update_resources_btn,
+        "stats_update_status": stats_update_status,
+
+        # Skills components
+        "skills_table": skills_table,
+        "skill_type_selector": skill_type_selector,
+        "skill_dropdown": skill_dropdown,
+        "skill_rating_input": skill_rating_input,
+        "skill_specialization_input": skill_specialization_input,
+        "add_skill_btn": add_skill_btn,
+        "remove_skill_btn": remove_skill_btn,
+        "skills_status": skills_status,
+
+        # Qualities components
+        "qualities_table": qualities_table,
+        "quality_type_selector": quality_type_selector,
+        "quality_dropdown": quality_dropdown,
+        "quality_rating_input": quality_rating_input,
+        "add_quality_btn": add_quality_btn,
+        "remove_quality_btn": remove_quality_btn,
+        "qualities_status": qualities_status,
+
+        # Gear components
+        "gear_table": gear_table,
+        "gear_category_selector": gear_category_selector,
+        "gear_dropdown": gear_dropdown,
+        "gear_quantity_input": gear_quantity_input,
+        "gear_rating_input": gear_rating_input,
+        "add_gear_btn": add_gear_btn,
+        "remove_gear_btn": remove_gear_btn,
+        "gear_status": gear_status,
+        "total_armor_display": total_armor_display,
+
+        # Other tables
+        "weapons_table": weapons_table,
+        "vehicles_table": vehicles_table,
+        "programs_table": programs_table,
+
+        # Cyberdeck
+        "cyberdeck_name": cyberdeck_name,
+        "cyberdeck_device_rating": cyberdeck_device_rating,
+        "cyberdeck_attack": cyberdeck_attack,
+        "cyberdeck_sleaze": cyberdeck_sleaze,
+        "cyberdeck_firewall": cyberdeck_firewall,
+        "cyberdeck_data_proc": cyberdeck_data_proc,
+        "cyberdeck_matrix_damage": cyberdeck_matrix_damage,
+        "update_cyberdeck_btn": update_cyberdeck_btn,
+        "matrix_status": matrix_status,
+
+        # Utilities
+        "populate_ref_btn": populate_ref_btn,
+        "export_btn": export_btn,
+        "dice_pool_btn": dice_pool_btn,
+        "utility_status": utility_status,
+    }
+
+
+# ===== WIRE UP ALL EVENT HANDLERS =====
+
+def wire_character_management_events(components):
+    """Wire up all the event handlers for character management."""
+
+    # Character selection and management
+    components["refresh_btn"].click(
+        fn=refresh_character_list,
+        outputs=[components["character_selector"], components["character_status"]]
+    )
+
+    components["character_selector"].change(
+        fn=select_character,
+        inputs=[components["character_selector"]],
+        outputs=[
+            components["character_status"],
+            gr.State(),  # stats
+            gr.State(),  # resources
+            components["skills_table"],
+            components["qualities_table"],
+            components["gear_table"],
+            components["weapons_table"],
+            components["vehicles_table"],
+            components["programs_table"],
+            gr.State()  # cyberdeck
+        ]
+    )
+
+    components["set_active_btn"].click(
+        fn=set_active_character,
+        inputs=[components["character_selector"]],
+        outputs=[components["character_status"]]
+    )
+
+    components["delete_btn"].click(
+        fn=delete_selected_character,
+        inputs=[components["character_selector"]],
+        outputs=[components["character_status"], components["character_selector"]]
+    )
+
+    # Character creation
+    components["create_btn"].click(
+        fn=create_new_character,
+        inputs=[
+            components["new_char_name"],
+            components["new_char_metatype"],
+            components["new_char_archetype"]
+        ],
+        outputs=[
+            components["create_status"],
+            components["character_selector"],
+            components["new_char_name"]
+        ]
+    )
+
+    # Stats and resources updates
+    components["update_stats_btn"].click(
+        fn=update_character_stats,
+        inputs=[
+            components["character_selector"],
+            components["body_input"], components["agility_input"], components["reaction_input"],
+            components["strength_input"], components["charisma_input"], components["logic_input"],
+            components["intuition_input"], components["willpower_input"], components["edge_input"],
+            components["essence_input"], components["physical_limit_input"],
+            components["mental_limit_input"], components["social_limit_input"],
+            components["initiative_input"], components["hot_sim_vr_input"]
+        ],
+        outputs=[components["stats_update_status"]]
+    )
+
+    components["update_resources_btn"].click(
+        fn=update_character_resources,
+        inputs=[
+            components["character_selector"],
+            components["nuyen_input"], components["street_cred_input"],
+            components["notoriety_input"], components["public_aware_input"],
+            components["total_karma_input"], components["available_karma_input"],
+            components["edge_pool_input"]
+        ],
+        outputs=[components["stats_update_status"]]
+    )
+
+    # Skills management
+    components["skill_type_selector"].change(
+        fn=get_skills_for_dropdown,
+        inputs=[components["skill_type_selector"]],
+        outputs=[components["skill_dropdown"]]
+    )
+
+    components["add_skill_btn"].click(
+        fn=add_character_skill,
+        inputs=[
+            components["character_selector"],
+            components["skill_dropdown"],
+            components["skill_rating_input"],
+            components["skill_specialization_input"],
+            components["skill_type_selector"],
+            components["skills_table"]
+        ],
+        outputs=[components["skills_status"], components["skills_table"]]
+    )
+
+    # Qualities management
+    components["quality_type_selector"].change(
+        fn=get_qualities_for_dropdown,
+        inputs=[components["quality_type_selector"]],
+        outputs=[components["quality_dropdown"]]
+    )
+
+    components["add_quality_btn"].click(
+        fn=add_character_quality,
+        inputs=[
+            components["character_selector"],
+            components["quality_dropdown"],
+            components["quality_rating_input"],
+            components["quality_type_selector"],
+            components["qualities_table"]
+        ],
+        outputs=[components["qualities_status"], components["qualities_table"]]
+    )
+
+    # Gear management
+    components["gear_category_selector"].change(
+        fn=get_gear_for_dropdown,
+        inputs=[components["gear_category_selector"]],
+        outputs=[components["gear_dropdown"]]
+    )
+
+    components["add_gear_btn"].click(
+        fn=add_character_gear,
+        inputs=[
+            components["character_selector"],
+            components["gear_dropdown"],
+            components["gear_category_selector"],
+            components["gear_quantity_input"],
+            components["gear_rating_input"],
+            components["gear_table"]
+        ],
+        outputs=[components["gear_status"], components["gear_table"]]
+    )
+
+    # Utilities
+    components["populate_ref_btn"].click(
+        fn=populate_reference_tables,
+        outputs=[components["utility_status"]]
+    )
+
+    components["export_btn"].click(
+        fn=export_character_for_gm,
+        inputs=[components["character_selector"]],
+        outputs=[components["utility_status"]]
+    )
+
+    # Auto-load reference data on tab load
+    components["skill_type_selector"].select(
+        fn=get_skills_for_dropdown,
+        inputs=[components["skill_type_selector"]],
+        outputs=[components["skill_dropdown"]]
+    )
+
+    components["quality_type_selector"].select(
+        fn=get_qualities_for_dropdown,
+        inputs=[components["quality_type_selector"]],
+        outputs=[components["quality_dropdown"]]
+    )
+
+
+# ===== EVENT WIRING FOR NEW COMPONENTS =====
+def wire_enhanced_component_events(components, character_selector):
+    """Wire up events for weapons, vehicles, and programs."""
+
+    # Weapons events
+    if "add_weapon_btn" in components:
+        components["add_weapon_btn"].click(
+            fn=add_character_weapon,
+            inputs=[
+                character_selector,
+                components["weapon_name_input"],
+                components["weapon_type_selector"],
+                components["weapon_mode_input"],
+                components["weapon_accuracy_input"],
+                components["weapon_damage_input"],
+                components["weapon_ap_input"],
+                components["weapon_rc_input"],
+                components["weapons_table"]
+            ],
+            outputs=[components["weapons_status"], components["weapons_table"]]
+        )
+
+        components["remove_weapon_btn"].click(
+            fn=remove_character_weapon,
+            inputs=[
+                character_selector,
+                gr.State(),  # selected index - would need to implement selection
+                components["weapons_table"]
+            ],
+            outputs=[components["weapons_status"], components["weapons_table"]]
+        )
+
+    # Vehicles events
+    if "add_vehicle_btn" in components:
+        components["add_vehicle_btn"].click(
+            fn=add_character_vehicle,
+            inputs=[
+                character_selector,
+                components["vehicle_name_input"],
+                components["vehicle_type_selector"],
+                components["vehicle_handling_input"],
+                components["vehicle_speed_input"],
+                components["vehicle_accel_input"],
+                components["vehicle_body_input"],
+                components["vehicle_armor_input"],
+                components["vehicle_pilot_input"],
+                components["vehicle_sensor_input"],
+                components["vehicle_seats_input"],
+                components["vehicles_table"]
+            ],
+            outputs=[components["vehicles_status"], components["vehicles_table"]]
+        )
+
+    # Programs events
+    if "add_program_btn" in components:
+        components["add_program_btn"].click(
+            fn=add_character_program,
+            inputs=[
+                character_selector,
+                components["program_name_input"],
+                components["program_rating_input"],
+                components["program_type_selector"],
+                components["programs_table"]
+            ],
+            outputs=[components["matrix_status"], components["programs_table"]]
+        )
+
+    # Cyberdeck events
+    if "update_cyberdeck_btn" in components:
+        components["update_cyberdeck_btn"].click(
+            fn=update_character_cyberdeck,
+            inputs=[
+                character_selector,
+                components["cyberdeck_name"],
+                components["cyberdeck_device_rating"],
+                components["cyberdeck_attack"],
+                components["cyberdeck_sleaze"],
+                components["cyberdeck_firewall"],
+                components["cyberdeck_data_proc"],
+                components["cyberdeck_matrix_damage"]
+            ],
+            outputs=[components["matrix_status"]]
+        )
+
 # ===== BUILD ENHANCED GRADIO INTERFACE =====
 
 def build_interface():
@@ -770,6 +2634,23 @@ def build_interface():
                             label="Query Type"
                         )
 
+                        with gr.Accordion("👤 Character Context", open=True):
+                            character_query_selector = gr.Dropdown(
+                                label="Active Character",
+                                choices=["None"],
+                                value="None",
+                                info="Select character for context-aware queries"
+                            )
+
+                            character_context_display = gr.Textbox(
+                                label="Character Status",
+                                value="No character selected",
+                                interactive=False,
+                                lines=2
+                            )
+
+                            refresh_char_btn = gr.Button("🔄 Refresh Characters", size="sm")
+
                         with gr.Accordion("👤 Character Context", open=False):
                             character_role_select = gr.Dropdown(
                                 choices=["None", "Decker", "Mage", "Street Samurai",
@@ -823,9 +2704,27 @@ def build_interface():
                         question_input, model_select, n_results_slider,
                         query_type_select, character_role_select, character_stats_input,
                         edition_select, section_filter, subsection_filter,
-                        document_type_filter, edition_filter
+                        document_type_filter, edition_filter, character_query_selector
                     ],
                     outputs=[answer_output, thinking_output, sources_output, chunks_output, thinking_accordion]
+                )
+
+                # Character selector refresh
+                refresh_char_btn.click(
+                    fn=get_character_selector_choices,
+                    outputs=[character_query_selector]
+                )
+
+                # Handle character selection for queries
+                character_query_selector.change(
+                    fn=handle_character_selection_for_query,
+                    inputs=[character_query_selector],
+                    outputs=[character_context_display]
+                )
+
+                app.load(
+                    fn=get_character_selector_choices,
+                    outputs=[character_query_selector]
                 )
 
             # ===== ENHANCED UPLOAD TAB =====
@@ -1085,6 +2984,10 @@ def build_interface():
                         group_filter, type_filter, edition_filter, group_selector
                     ]
                 )
+
+            # ===== CHARACTER MANAGEMENT TAB =====
+            char_components = build_character_management_tab()
+            wire_character_management_events(char_components)
 
             # ===== SESSION NOTES TAB =====
             with gr.Tab("📝 Session Notes"):
