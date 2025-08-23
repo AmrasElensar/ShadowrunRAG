@@ -241,10 +241,10 @@ current_page = 1
 
 # ===== UPLOAD TAB FUNCTIONS =====
 
-def process_uploads(files, document_type: str) -> str:
+def process_uploads(files, document_type: str) -> tuple:
     """Process uploaded PDFs with document type specification."""
     if not files:
-        return "No files selected"
+        return "No files selected", gr.update(value=[])
 
     if not document_type:
         document_type = "rulebook"  # Default fallback
@@ -266,7 +266,7 @@ def process_uploads(files, document_type: str) -> str:
 
         results.append(f"✅ {file_name}: Processing started as {document_type} (Job: {job_id[-8:]})")
 
-    return "\n".join(results)
+    return "\n".join(results), gr.update(value=[])
 
 def poll_progress():
     """Enhanced progress polling with document type information."""
@@ -276,7 +276,7 @@ def poll_progress():
         jobs = response.json().get("active_jobs", {})
 
         if not jobs:
-            return "No active processing jobs", gr.update(visible=False), 0
+            return "No active processing jobs", gr.update(visible=False), 0, "✅ All processing complete!"
 
         # Format progress information
         progress_lines = []
@@ -308,7 +308,15 @@ def poll_progress():
         progress_text = "\n\n".join(progress_lines)
         avg_progress = sum(progress_values) / len(progress_values) if progress_values else 0
 
-        return progress_text, gr.update(visible=True, value=avg_progress), avg_progress
+        # Create upload status summary
+        upload_summary = f"📄 Processing {len(jobs)} file(s):\n" + "\n".join([
+            f"• {parts[1] if len(parts) >= 2 else job_id}: {stage} ({progress:.0f}%)"
+            for job_id, job_info in jobs.items()
+            for stage, progress in [(job_info.get('stage', 'unknown'), job_info.get('progress', 0))]
+            for parts in [job_id.split('_')]
+        ])
+
+        return progress_text, gr.update(visible=True, value=avg_progress), avg_progress, upload_summary
 
     except Exception as e:
         return f"Error checking progress: {str(e)}", gr.update(visible=False), 0
@@ -894,12 +902,12 @@ def build_interface():
                         upload_btn.click(
                             fn=process_uploads,
                             inputs=[file_upload, document_type_select],
-                            outputs=[upload_status]
+                            outputs=[upload_status, file_upload]
                         )
 
                         check_progress_btn.click(
                             fn=poll_progress,
-                            outputs=[progress_status, progress_display, gr.State()]
+                            outputs=[progress_status, progress_display, gr.State(), upload_status]
                         )
 
                         reindex_btn.click(
@@ -926,7 +934,7 @@ def build_interface():
                 )
                 timer.tick(
                     fn=poll_progress,
-                    outputs=[progress_status, progress_display, gr.State()]
+                    outputs=[progress_status, progress_display, gr.State(), upload_status]
                 )
 
             # ===== ENHANCED DOCUMENTS TAB =====
