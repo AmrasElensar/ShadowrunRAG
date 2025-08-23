@@ -223,7 +223,7 @@ class RAGClient:
             response = requests.post(
                 f"{self.api_url}/index",
                 json={"force_reindex": force},
-                timeout=30
+                timeout=300
             )
             response.raise_for_status()
             return response.json()
