@@ -306,11 +306,12 @@ class Retriever:
         """Fetch specific chunks by their chunk_id metadata."""
         try:
             # Use ChromaDB where filter to find chunks by chunk_id
+            # ✅ FIXED: Remove 'distances' from include - .get() doesn't support it
             results = self.collection.get(
                 where={
                     "chunk_id": {"$in": list(chunk_ids)}
                 },
-                include=['documents', 'metadatas', 'distances']
+                include=['documents', 'metadatas']  # Only documents and metadatas
             )
 
             # Convert to search result format

@@ -7,6 +7,7 @@ import requests
 import logging
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,57 @@ class RAGClient:
             )
             response.raise_for_status()
 
-            # ... (rest of the streaming logic from original)
-            # This would be copied from your original implementation
+            # Initialize streaming state
+            full_response = ""
+            thinking_content = ""
+            current_mode = "answer"  # "answer" or "thinking"
+            metadata = None
+
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+
+                # Check for metadata packet
+                if line.startswith("__METADATA_START__"):
+                    continue
+                elif line.startswith("__METADATA_END__"):
+                    continue
+                elif line.strip().startswith("{") and '"done": true' in line:
+                    try:
+                        metadata = json.loads(line.strip())
+                        # Final yield with complete response
+                        yield full_response, thinking_content, metadata, "complete"
+                        return
+                    except json.JSONDecodeError:
+                        pass
+
+                # Parse <think> tags for thinking mode
+                if "<think>" in line:
+                    current_mode = "thinking"
+                    line = line.replace("<think>", "")
+                elif "</think>" in line:
+                    current_mode = "answer"
+                    line = line.replace("</think>", "")
+
+                # Accumulate content based on mode
+                if current_mode == "thinking":
+                    thinking_content += line
+                else:
+                    full_response += line
+
+                # Yield intermediate state
+                status = "thinking" if current_mode == "thinking" else "generating"
+                yield full_response, thinking_content, None, status
+
+            # Final yield if no metadata was received
+            yield full_response, thinking_content, metadata or {}, "complete"
+
+        except requests.RequestException as e:
+            logger.error(f"Request failed: {e}")
+            yield f"Connection Error: {str(e)}", "", None, "error"
+        except Exception as e:
+            logger.error(f"Query failed: {e}")
+            yield f"Error: {str(e)}", "", None, "error"
 
         except Exception as e:
             logger.error(f"Query failed: {e}")
