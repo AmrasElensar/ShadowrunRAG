@@ -834,79 +834,91 @@ def wire_equipment_events(components: Dict, handlers: CharacterEquipmentHandlers
     """Wire up all equipment management events with proper dropdown cascading."""
 
     # ===== GEAR TAB EVENTS =====
+    if "gear_category_selector" in components and "gear_dropdown" in components:
+        components["gear_category_selector"].change(
+            fn=handlers.populate_gear_dropdown,
+            inputs=[components["gear_category_selector"]],
+            outputs=[components["gear_dropdown"]]
+        )
 
-    components["gear_category_selector"].change(
-        fn=handlers.populate_gear_dropdown,
-        inputs=[components["gear_category_selector"]],
-        outputs=[components["gear_dropdown"]]
-    )
-
-    components["add_gear_btn"].click(
-        fn=handlers.add_gear_to_character,
-        inputs=[
-            components["character_selector"],  # From main character selector
-            components["gear_dropdown"],
-            components["gear_category_selector"],
-            components["gear_quantity_input"],
-            components["gear_rating_input"]
-        ],
-        outputs=[components["gear_status"], components["gear_table"]]
-    )
+    if all(key in components for key in
+           ["add_gear_btn", "character_selector", "gear_dropdown", "gear_category_selector", "gear_quantity_input",
+            "gear_rating_input", "gear_status", "gear_table"]):
+        components["add_gear_btn"].click(
+            fn=handlers.add_gear_to_character,
+            inputs=[
+                components["character_selector"],
+                components["gear_dropdown"],
+                components["gear_category_selector"],
+                components["gear_quantity_input"],
+                components["gear_rating_input"]
+            ],
+            outputs=[components["gear_status"], components["gear_table"]]
+        )
 
     # ===== WEAPONS TAB EVENTS =====
+    if "weapon_type_selector" in components and "weapon_category_selector" in components:
+        components["weapon_type_selector"].change(
+            fn=handlers.populate_weapon_category_dropdown,
+            inputs=[components["weapon_type_selector"]],
+            outputs=[components["weapon_category_selector"]]
+        )
 
-    components["weapon_type_selector"].change(
-        fn=handlers.populate_weapon_category_dropdown,
-        inputs=[components["weapon_type_selector"]],
-        outputs=[components["weapon_category_selector"]]
-    )
+    if "weapon_category_selector" in components and "weapon_dropdown" in components and "weapon_type_selector" in components:
+        components["weapon_category_selector"].change(
+            fn=handlers.populate_weapon_dropdown,
+            inputs=[components["weapon_type_selector"], components["weapon_category_selector"]],
+            outputs=[components["weapon_dropdown"]]
+        )
 
-    components["weapon_category_selector"].change(
-        fn=handlers.populate_weapon_dropdown,
-        inputs=[components["weapon_type_selector"], components["weapon_category_selector"]],
-        outputs=[components["weapon_dropdown"]]
-    )
-
-    components["add_weapon_btn"].click(
-        fn=handlers.add_weapon_to_character,
-        inputs=[
-            components["character_selector"],
-            components["weapon_dropdown"],
-            components["weapon_type_selector"],
-            components["weapon_category_selector"],
-            components["weapon_accessories"]
-        ],
-        outputs=[components["weapons_status"], components["weapons_table"]]
-    )
+    if all(key in components for key in
+           ["add_weapon_btn", "character_selector", "weapon_dropdown", "weapon_type_selector",
+            "weapon_category_selector", "weapon_accessories", "weapons_status", "weapons_table"]):
+        components["add_weapon_btn"].click(
+            fn=handlers.add_weapon_to_character,
+            inputs=[
+                components["character_selector"],
+                components["weapon_dropdown"],
+                components["weapon_type_selector"],
+                components["weapon_category_selector"],
+                components["weapon_accessories"]
+            ],
+            outputs=[components["weapons_status"], components["weapons_table"]]
+        )
 
     # ===== VEHICLES TAB EVENTS =====
+    if "vehicle_type_selector" in components and "vehicle_dropdown" in components:
+        components["vehicle_type_selector"].change(
+            fn=handlers.populate_vehicle_dropdown,
+            inputs=[components["vehicle_type_selector"]],
+            outputs=[components["vehicle_dropdown"]]
+        )
 
-    components["vehicle_type_selector"].change(
-        fn=handlers.populate_vehicle_dropdown,
-        inputs=[components["vehicle_type_selector"]],
-        outputs=[components["vehicle_dropdown"]]
-    )
-
-    components["add_vehicle_btn"].click(
-        fn=handlers.add_vehicle_to_character,
-        inputs=[
-            components["character_selector"],
-            components["vehicle_dropdown"],
-            components["vehicle_type_selector"],
-            components["vehicle_mods"]
-        ],
-        outputs=[components["vehicles_status"], components["vehicles_table"]]
-    )
+    if all(key in components for key in
+           ["add_vehicle_btn", "character_selector", "vehicle_dropdown", "vehicle_type_selector", "vehicle_mods",
+            "vehicles_status", "vehicles_table"]):
+        components["add_vehicle_btn"].click(
+            fn=handlers.add_vehicle_to_character,
+            inputs=[
+                components["character_selector"],
+                components["vehicle_dropdown"],
+                components["vehicle_type_selector"],
+                components["vehicle_mods"]
+            ],
+            outputs=[components["vehicles_status"], components["vehicles_table"]]
+        )
 
     # ===== ARMOR TAB EVENTS =====
-    if "armor_category_selector" in components:
+    if "armor_category_selector" in components and "armor_dropdown" in components:
         components["armor_category_selector"].change(
             fn=handlers.populate_armor_dropdown,
             inputs=[components["armor_category_selector"]],
             outputs=[components["armor_dropdown"]]
         )
 
-    if "add_armor_btn" in components:
+    if all(key in components for key in
+           ["add_armor_btn", "character_selector", "armor_dropdown", "armor_category_selector", "armor_status",
+            "armor_table"]):
         components["add_armor_btn"].click(
             fn=handlers.add_armor_to_character,
             inputs=[
@@ -918,21 +930,23 @@ def wire_equipment_events(components: Dict, handlers: CharacterEquipmentHandlers
         )
 
     # ===== ACCESSORIES TAB EVENTS =====
-    if "accessory_type_selector" in components:
+    if "accessory_type_selector" in components and "accessory_category_selector" in components:
         components["accessory_type_selector"].change(
             fn=handlers.populate_accessory_category_dropdown,
             inputs=[components["accessory_type_selector"]],
             outputs=[components["accessory_category_selector"]]
         )
 
-    if "accessory_category_selector" in components:
+    if "accessory_category_selector" in components and "accessory_dropdown" in components:
         components["accessory_category_selector"].change(
             fn=handlers.populate_accessory_dropdown,
             inputs=[components["accessory_type_selector"], components["accessory_category_selector"]],
             outputs=[components["accessory_dropdown"]]
         )
 
-    if "add_accessory_btn" in components:
+    if all(key in components for key in
+           ["add_accessory_btn", "character_selector", "accessory_dropdown", "accessory_type_selector",
+            "accessory_category_selector", "accessories_status", "accessories_table"]):
         components["add_accessory_btn"].click(
             fn=handlers.add_accessory_to_character,
             inputs=[
@@ -945,14 +959,16 @@ def wire_equipment_events(components: Dict, handlers: CharacterEquipmentHandlers
         )
 
     # ===== PROGRAMS TAB EVENTS =====
-    if "program_type_selector" in components:
+    if "program_type_selector" in components and "program_dropdown" in components:
         components["program_type_selector"].change(
             fn=handlers.populate_program_dropdown,
             inputs=[components["program_type_selector"]],
             outputs=[components["program_dropdown"]]
         )
 
-    if "add_program_btn" in components:
+    if all(key in components for key in
+           ["add_program_btn", "character_selector", "program_dropdown", "program_type_selector",
+            "program_rating_input", "programs_status", "programs_table"]):
         components["add_program_btn"].click(
             fn=handlers.add_program_to_character,
             inputs=[
@@ -964,7 +980,9 @@ def wire_equipment_events(components: Dict, handlers: CharacterEquipmentHandlers
             outputs=[components["programs_status"], components["programs_table"]]
         )
 
-    if "set_cyberdeck_btn" in components:
+    if all(key in components for key in
+           ["set_cyberdeck_btn", "character_selector", "cyberdeck_selector", "programs_status", "deck_attack",
+            "deck_sleaze", "deck_data_proc", "deck_firewall"]):
         components["set_cyberdeck_btn"].click(
             fn=handlers.set_character_cyberdeck,
             inputs=[components["character_selector"], components["cyberdeck_selector"]],
@@ -976,6 +994,12 @@ def wire_equipment_events(components: Dict, handlers: CharacterEquipmentHandlers
                 components["deck_firewall"]
             ]
         )
+
+    # Debug: Print available components to help troubleshoot
+    equipment_keys = [k for k in components.keys() if any(prefix in k for prefix in
+                                                          ['gear_', 'weapon_', 'vehicle_', 'armor_', 'accessory_',
+                                                           'program_', 'cyberdeck_', 'deck_'])]
+    print(f"Available equipment components: {equipment_keys}")
 
     # ===== AUTO-POPULATE ON LOAD =====
 

@@ -737,12 +737,15 @@ def wire_character_events(components: Dict, handlers: CharacterEventHandlers):
         outputs=[components["utility_status"]]
     )
 
+    # Wire equipment events if equipment components exist
     equipment_components = {k: v for k, v in components.items()
                             if any(prefix in k for prefix in ['gear_', 'weapon_', 'vehicle_',
                                                               'armor_', 'accessory_', 'program_',
                                                               'cyberdeck_', 'deck_'])}
 
     if equipment_components:
+        # Add the character_selector to equipment components since it's needed for equipment operations
+        equipment_components['character_selector'] = components['character_selector']
         equipment_handlers = handlers.get_equipment_handlers()
         wire_equipment_events(equipment_components, equipment_handlers)
 
