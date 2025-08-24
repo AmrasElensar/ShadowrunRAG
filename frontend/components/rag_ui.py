@@ -292,12 +292,28 @@ class RAGQueryHandlers:
             logger.warning(f"Failed to get character context: {e}")
             # Continue without character context
 
-        # Stream response with thinking support
+        # Stream response with thinking support - FIXED STREAMING LOGIC
         try:
+            # Initialize streaming state
+            current_answer = ""
+            current_thinking = ""
+            thinking_visible = False
+
             for response, thinking, metadata, status in self.rag_client.query_stream(question, **params):
                 if status == "error":
                     yield response, "", "", [], gr.update(visible=False)
-                elif status == "complete" and metadata:
+                    return
+
+                # Update current content
+                current_answer = response
+                current_thinking = thinking
+
+                # Check if we have thinking content
+                has_thinking = bool(thinking and thinking.strip())
+                if has_thinking and not thinking_visible:
+                    thinking_visible = True
+
+                if status == "complete" and metadata:
                     # Format sources
                     sources_text = ""
                     if metadata.get("sources"):
@@ -327,15 +343,16 @@ class RAGQueryHandlers:
                             content = chunk[:200] + "..." if len(chunk) > 200 else chunk
                             chunks_data.append([relevance, content])
 
-                    # Show thinking accordion if there's thinking content
-                    thinking_visible = bool(thinking and thinking.strip())
-
-                    yield response, thinking, sources_text, chunks_data, gr.update(visible=thinking_visible)
+                    # Final yield with complete data
+                    yield current_answer, current_thinking, sources_text, chunks_data, gr.update(
+                        visible=thinking_visible)
                 else:
-                    # Still generating
-                    thinking_visible = bool(thinking and thinking.strip())
+                    # Intermediate yield for smooth streaming
+                    # Show cursor while generating
                     cursor = "▌" if status == "generating" else "🤔" if status == "thinking" else ""
-                    yield response + cursor, thinking, "", [], gr.update(visible=thinking_visible)
+                    display_answer = current_answer + cursor
+
+                    yield display_answer, current_thinking, "", [], gr.update(visible=thinking_visible)
 
         except Exception as e:
             error_msg = UIErrorHandler.handle_exception(e, "query submission")

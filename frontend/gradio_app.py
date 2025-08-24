@@ -13,6 +13,7 @@ from api_clients.character_client import CharacterAPIClient
 from components.rag_ui import RAGQueryUI, RAGQueryHandlers, wire_query_events, get_initial_character_choices
 from components.character_ui import CharacterUI, CharacterEventHandlers, wire_character_events
 from components.document_ui import DocumentUI, DocumentHandlers, wire_document_events
+from components.upload_ui import UploadUI, UploadHandlers, wire_upload_events
 from ui_helpers.ui_helpers import setup_ui_logging, get_custom_css
 
 logger = logging.getLogger(__name__)
@@ -33,16 +34,19 @@ class ShadowrunRAGApp:
         self.rag_ui = RAGQueryUI(self.rag_client, self.char_api)
         self.character_ui = CharacterUI(self.char_api)
         self.document_ui = DocumentUI(self.rag_client)
+        self.upload_ui = UploadUI(self.rag_client)
 
         # Initialize event handlers
         self.rag_handlers = RAGQueryHandlers(self.rag_client, self.char_api)
         self.character_handlers = CharacterEventHandlers(self.char_api)
         self.document_handlers = DocumentHandlers(self.rag_client)
+        self.upload_handlers = UploadHandlers(self.rag_client)
 
         # Store components for event wiring
         self.rag_components = {}
         self.document_components = {}
         self.character_components = {}
+        self.upload_components = {}
 
     def build_interface(self):
         """Build the complete Gradio interface."""
@@ -53,7 +57,7 @@ class ShadowrunRAGApp:
             with gr.Tabs():
                 # Build each tab and store components
                 self.rag_components = self._build_query_tab()
-                upload_components = self._build_upload_tab()
+                self.upload_components = self._build_upload_tab()
                 self.document_components = self._build_documents_tab()
                 self.character_components = self._build_character_tab()
                 self._build_session_notes_tab()
@@ -74,12 +78,8 @@ class ShadowrunRAGApp:
         return self.rag_ui.build_query_tab()
 
     def _build_upload_tab(self):
-        """Build the upload tab (placeholder for now)."""
-        with gr.Tab("📤 Upload"):
-            # This will be implemented in upload_ui.py
-            gr.Markdown("### 📄 Document Upload")
-            gr.Markdown("*Upload functionality will be implemented here*")
-            return {}
+        """Build the upload tab."""
+        return self.upload_ui.build_upload_tab()
 
     def _build_documents_tab(self):
         """Build the documents tab."""
@@ -126,6 +126,9 @@ class ShadowrunRAGApp:
         """Wire up all event handlers across components."""
         # Wire RAG query events
         wire_query_events(self.rag_components, self.rag_handlers)
+
+        # Wire upload events
+        wire_upload_events(self.upload_components, self.upload_handlers)
 
         # Wire document events
         wire_document_events(self.document_components, self.document_handlers)

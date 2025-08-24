@@ -42,7 +42,7 @@ services:
       - ./cache/marker:/root/.cache/datalab  # Marker models (2.5GB)
     environment:
       - OLLAMA_HOST=http://ollama:11434
-      - EMBEDDING_MODEL=nomic-embed-text
+      - EMBEDDING_MODEL=mxbai-embed-large
 
       - LLM_MODEL=phi4-reasoning:plus
       

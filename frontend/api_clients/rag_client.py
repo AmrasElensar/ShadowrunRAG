@@ -58,57 +58,73 @@ class RAGClient:
             )
             response.raise_for_status()
 
-            # Initialize streaming state
             full_response = ""
             thinking_content = ""
-            current_mode = "answer"  # "answer" or "thinking"
             metadata = None
+            metadata_buffer = ""
+            collecting_metadata = False
+            in_thinking = False
 
-            for line in response.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
+            for chunk in response.iter_content(chunk_size=32, decode_unicode=True):
+                if chunk:
+                    # Handle thinking tags
+                    if "__THINKING_START__" in chunk:
+                        in_thinking = True
+                        parts = chunk.split("__THINKING_START__")
+                        if parts[0]:
+                            full_response += parts[0]
+                            yield full_response, thinking_content, None, "generating"
+                        if len(parts) > 1:
+                            thinking_content += parts[1]
+                            yield full_response, thinking_content, None, "thinking"
+                        continue
 
-                # Check for metadata packet
-                if line.startswith("__METADATA_START__"):
-                    continue
-                elif line.startswith("__METADATA_END__"):
-                    continue
-                elif line.strip().startswith("{") and '"done": true' in line:
-                    try:
-                        metadata = json.loads(line.strip())
-                        # Final yield with complete response
-                        yield full_response, thinking_content, metadata, "complete"
-                        return
-                    except json.JSONDecodeError:
-                        pass
+                    if "__THINKING_END__" in chunk and in_thinking:
+                        in_thinking = False
+                        parts = chunk.split("__THINKING_END__")
+                        if parts[0]:
+                            thinking_content += parts[0]
+                            yield full_response, thinking_content, None, "thinking"
+                        if len(parts) > 1:
+                            full_response += parts[1]
+                            yield full_response, thinking_content, None, "generating"
+                        continue
 
-                # Parse <think> tags for thinking mode
-                if "<think>" in line:
-                    current_mode = "thinking"
-                    line = line.replace("<think>", "")
-                elif "</think>" in line:
-                    current_mode = "answer"
-                    line = line.replace("</think>", "")
+                    # Handle metadata
+                    if "__METADATA_START__" in chunk:
+                        parts = chunk.split("__METADATA_START__")
+                        if parts[0]:
+                            if in_thinking:
+                                thinking_content += parts[0]
+                            else:
+                                full_response += parts[0]
+                            yield full_response, thinking_content, None, "generating"
 
-                # Accumulate content based on mode
-                if current_mode == "thinking":
-                    thinking_content += line
-                else:
-                    full_response += line
+                        collecting_metadata = True
+                        if len(parts) > 1:
+                            metadata_buffer = parts[1]
+                        continue
 
-                # Yield intermediate state
-                status = "thinking" if current_mode == "thinking" else "generating"
-                yield full_response, thinking_content, None, status
+                    if collecting_metadata:
+                        metadata_buffer += chunk
+                        if "__METADATA_END__" in metadata_buffer:
+                            json_part = metadata_buffer.split("__METADATA_END__")[0].strip()
+                            try:
+                                metadata = json.loads(json_part)
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Metadata parse failed: {e}")
+                            break
+                    else:
+                        # Regular content
+                        if in_thinking:
+                            thinking_content += chunk
+                            yield full_response, thinking_content, None, "thinking"
+                        else:
+                            full_response += chunk
+                            yield full_response, thinking_content, None, "generating"
 
-            # Final yield if no metadata was received
-            yield full_response, thinking_content, metadata or {}, "complete"
-
-        except requests.RequestException as e:
-            logger.error(f"Request failed: {e}")
-            yield f"Connection Error: {str(e)}", "", None, "error"
-        except Exception as e:
-            logger.error(f"Query failed: {e}")
-            yield f"Error: {str(e)}", "", None, "error"
+            # Final yield with metadata
+            yield full_response, thinking_content, metadata, "complete"
 
         except Exception as e:
             logger.error(f"Query failed: {e}")

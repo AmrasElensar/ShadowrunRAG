@@ -79,23 +79,33 @@ class Retriever:
 
         # Enhanced settings for different query types
         if query_type == "rules":
-            options.update({"temperature": 0.1, "top_k": 20, "top_p": 0.8})  # Very focused for rules
-        elif query_type == "character":
-            options.update({"temperature": 0.2, "top_k": 25, "top_p": 0.85})  # Focused for character info
+            options.update({
+                "temperature": 0.8,
+                "top_p": 0.95,
+                "max_tokens": 1024,
+            })
         elif query_type == "session":
-            options.update({"temperature": 0.6, "top_k": 40, "top_p": 0.9})  # More creative for sessions
-        else:
-            options.update({"temperature": 0.3, "top_k": 30, "top_p": 0.85})  # Balanced default
+            options.update({
+                "temperature": 0.9,  # Slightly lower - still creative but more coherent
+                "top_p": 0.95,  # Good as-is
+                "max_tokens": 2048  # Keep as-is for creative generation
+            })
+        else:  # "character", "general", or default
+            options.update({
+                "temperature": 0.8,  # Lower for more consistent responses
+                "top_p": 0.95,  # Tighter sampling
+                "max_tokens": 1024  # Good as-is
+            })
 
         logger.debug(f"Using {query_type} settings: temp={options['temperature']}")
         return options
 
     def build_enhanced_filter(
-        self,
-        character_role: Optional[str] = None,
-        where_filter: Optional[Dict] = None
+            self,
+            character_role: Optional[str] = None,
+            where_filter: Optional[Dict] = None
     ) -> Optional[Dict]:
-        """Enhanced filter building with character role precedence."""
+        """Enhanced filter building with character role precedence, converted to ChromaDB format."""
 
         # Start with provided filter or empty dict
         final_filter = where_filter.copy() if where_filter else {}
@@ -111,10 +121,21 @@ class Retriever:
 
             logger.info(f"Character role '{character_role}' overrode section filter → '{role_section}'")
 
-        # Log final filter for debugging
+        # Convert to ChromaDB format - use simple equality for single filters
         if final_filter:
-            logger.info(f"Final enhanced filter: {final_filter}")
-            return final_filter
+            if len(final_filter) == 1:
+                # Single filter - return as simple key-value pair
+                key, value = next(iter(final_filter.items()))
+                chroma_filter = {key: value}
+            else:
+                # Multiple filters - use $and with simple equality
+                and_conditions = []
+                for key, value in final_filter.items():
+                    and_conditions.append({key: value})
+                chroma_filter = {"$and": and_conditions}
+
+            logger.info(f"Final enhanced filter (ChromaDB format): {chroma_filter}")
+            return chroma_filter
         else:
             logger.info("No filters applied")
             return None
@@ -261,7 +282,7 @@ class Retriever:
             n_results: int = 5,
             where_filter: Optional[Dict] = None,
             character_role: Optional[str] = None,
-            fetch_linked: bool = True
+            fetch_linked: bool = False
     ) -> Dict:
         """Enhanced search that automatically fetches linked chunks."""
 

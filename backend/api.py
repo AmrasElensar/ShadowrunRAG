@@ -1202,6 +1202,72 @@ async def get_character_query_context(character_id: int):
         logger.error(f"Error getting character context: {e}")
         raise HTTPException(500, f"Failed to get character context: {str(e)}")
 
+
+@app.get("/debug/context-real")
+async def debug_context_real(
+        query: str,
+        character_role: str = None,
+        edition: str = "SR5"
+):
+    """Debug endpoint showing EXACT context sent to LLM without calling LLM"""
+
+    # Use your exact search path
+    where_filter = {"edition": edition} if edition else None
+    enhanced_filter = retriever.build_enhanced_filter(character_role, where_filter)
+
+    search_results = retriever.search_with_linked_chunks(
+        query,
+        n_results=5,
+        where_filter=enhanced_filter,
+        character_role=character_role,
+        fetch_linked=False
+    )
+
+    if not search_results['documents']:
+        return {"error": "No documents found"}
+
+    # Build the exact context that would be sent to the LLM
+    context = retriever.build_enhanced_context_with_sequence(search_results)
+
+    return {
+        "raw_context_sent_to_llm": context,
+        "chunks_count": len(search_results['documents']),
+        "linked_chunks_fetched": search_results.get('linked_chunks_fetched', 0),
+        "first_chunk_preview": search_results['documents'][0][:200] if search_results['documents'] else None,
+        "metadatas": search_results['metadatas']
+    }
+
+
+@app.get("/debug/context-text")
+async def debug_context_as_text(
+        query: str,
+        character_role: str = None,
+        edition: str = "SR5"
+):
+    # Use your exact search path
+    where_filter = {"edition": edition} if edition else None
+    enhanced_filter = retriever.build_enhanced_filter(character_role, where_filter)
+
+    search_results = retriever.search_with_linked_chunks(
+        query,
+        n_results=5,
+        where_filter=enhanced_filter,
+        character_role=character_role,
+        fetch_linked=False
+    )
+
+    if not search_results['documents']:
+        return {"error": "No documents found"}
+
+    # Build the exact context that would be sent to the LLM
+    context = retriever.build_enhanced_context_with_sequence(search_results)
+
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        content=context,  # This will preserve actual newlines
+        headers={"Content-Type": "text/plain; charset=utf-8"}
+    )
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
