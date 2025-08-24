@@ -61,7 +61,7 @@ class CharacterEquipmentUI:
                 gear_table = gr.Dataframe(
                     headers=["Item", "Category", "Quantity", "Rating", "Cost"],
                     datatype=["str", "str", "number", "number", "number"],
-                    value=[],
+                    value=None,
                     interactive=False,
                     label="Character Gear"
                 )
@@ -132,7 +132,7 @@ class CharacterEquipmentUI:
                 weapons_table = gr.Dataframe(
                     headers=["Weapon", "Type", "Accuracy", "Damage", "AP", "Mode", "Cost"],
                     datatype=["str", "str", "str", "str", "str", "str", "number"],
-                    value=[],
+                    value=None,
                     interactive=False,
                     label="Character Weapons"
                 )
@@ -200,7 +200,7 @@ class CharacterEquipmentUI:
                 vehicles_table = gr.Dataframe(
                     headers=["Vehicle", "Type", "Handling", "Speed", "Body", "Armor", "Cost"],
                     datatype=["str", "str", "number", "number", "number", "number", "number"],
-                    value=[],
+                    value=None,
                     interactive=False,
                     label="Character Vehicles"
                 )
@@ -268,7 +268,7 @@ class CharacterEquipmentUI:
                 armor_table = gr.Dataframe(
                     headers=["Armor", "Type", "Armor Rating", "Modifications", "Cost"],
                     datatype=["str", "str", "number", "str", "number"],
-                    value=[],
+                    value=None,
                     interactive=False,
                     label="Character Armor"
                 )
@@ -344,7 +344,7 @@ class CharacterEquipmentUI:
                 accessories_table = gr.Dataframe(
                     headers=["Item", "Type", "Mount", "Quantity", "Cost"],
                     datatype=["str", "str", "str", "number", "number"],
-                    value=[],
+                    value=None,
                     interactive=False,
                     label="Accessories & Ammunition"
                 )
@@ -413,7 +413,7 @@ class CharacterEquipmentUI:
                 programs_table = gr.Dataframe(
                     headers=["Program", "Type", "Rating", "Description"],
                     datatype=["str", "str", "number", "str"],
-                    value=[],
+                    value=None,
                     interactive=False,
                     label="Character Programs"
                 )
@@ -709,6 +709,62 @@ class CharacterEquipmentHandlers:
             gr.update(value=cyberdeck_data.get("firewall", 0))
         )
 
+    def add_armor_to_character(self, character_id, armor_name, armor_category):
+        """Add armor to character."""
+        if not character_id or not armor_name:
+            return "No character or armor selected", gr.update()
+
+        armor_data = {
+            "name": armor_name,
+            "category": armor_category
+        }
+
+        result = self.char_api.add_character_armor(character_id, armor_data)
+        if "error" in result:
+            return f"❌ Failed to add armor: {result['error']}", gr.update()
+
+        # Refresh armor table
+        updated_armor = self._get_character_armor_table(character_id)
+        return "✅ Armor added successfully!", gr.update(value=updated_armor)
+
+    def add_accessory_to_character(self, character_id, accessory_name, accessory_type, category):
+        """Add accessory to character."""
+        if not character_id or not accessory_name:
+            return "No character or accessory selected", gr.update()
+
+        accessory_data = {
+            "name": accessory_name,
+            "type": accessory_type,
+            "category": category
+        }
+
+        result = self.char_api.add_character_accessory(character_id, accessory_data)
+        if "error" in result:
+            return f"❌ Failed to add accessory: {result['error']}", gr.update()
+
+        # Refresh accessories table
+        updated_accessories = self._get_character_accessories_table(character_id)
+        return "✅ Accessory added successfully!", gr.update(value=updated_accessories)
+
+    def add_program_to_character(self, character_id, program_name, program_type, rating):
+        """Add program to character."""
+        if not character_id or not program_name:
+            return "No character or program selected", gr.update()
+
+        program_data = {
+            "name": program_name,
+            "type": program_type,
+            "rating": rating
+        }
+
+        result = self.char_api.add_character_program(character_id, program_data)
+        if "error" in result:
+            return f"❌ Failed to add program: {result['error']}", gr.update()
+
+        # Refresh programs table
+        updated_programs = self._get_character_programs_table(character_id)
+        return "✅ Program added successfully!", gr.update(value=updated_programs)
+
     # ===== HELPER METHODS =====
 
     def _get_character_gear_table(self, character_id):
@@ -740,6 +796,36 @@ class CharacterEquipmentHandlers:
                 [v["name"], v["vehicle_type"], v["handling"], v["speed"],
                  v["body"], v["armor"], v["cost"]]
                 for v in character_data["vehicles"]
+            ]
+        return []
+
+    def _get_character_armor_table(self, character_id):
+        """Get formatted armor table for character."""
+        character_data = self.char_api.get_character(character_id)
+        if "armor" in character_data:
+            return [
+                [a["name"], a["category"], a["armor_rating"], a["capacity"], a["avail"], a["cost"]]
+                for a in character_data["armor"]
+            ]
+        return []
+
+    def _get_character_accessories_table(self, character_id):
+        """Get formatted accessories table for character."""
+        character_data = self.char_api.get_character(character_id)
+        if "accessories" in character_data:
+            return [
+                [a["name"], a["type"], a["category"], a["rating"], a["avail"], a["cost"]]
+                for a in character_data["accessories"]
+            ]
+        return []
+
+    def _get_character_programs_table(self, character_id):
+        """Get formatted programs table for character."""
+        character_data = self.char_api.get_character(character_id)
+        if "programs" in character_data:
+            return [
+                [p["name"], p["type"], p["rating"], p["avail"], p["cost"]]
+                for p in character_data["programs"]
             ]
         return []
 
@@ -813,46 +899,83 @@ def wire_equipment_events(components: Dict, handlers: CharacterEquipmentHandlers
     )
 
     # ===== ARMOR TAB EVENTS =====
+    if "armor_category_selector" in components:
+        components["armor_category_selector"].change(
+            fn=handlers.populate_armor_dropdown,
+            inputs=[components["armor_category_selector"]],
+            outputs=[components["armor_dropdown"]]
+        )
 
-    components["armor_category_selector"].change(
-        fn=handlers.populate_armor_dropdown,
-        inputs=[components["armor_category_selector"]],
-        outputs=[components["armor_dropdown"]]
-    )
+    if "add_armor_btn" in components:
+        components["add_armor_btn"].click(
+            fn=handlers.add_armor_to_character,
+            inputs=[
+                components["character_selector"],
+                components["armor_dropdown"],
+                components["armor_category_selector"]
+            ],
+            outputs=[components["armor_status"], components["armor_table"]]
+        )
 
     # ===== ACCESSORIES TAB EVENTS =====
+    if "accessory_type_selector" in components:
+        components["accessory_type_selector"].change(
+            fn=handlers.populate_accessory_category_dropdown,
+            inputs=[components["accessory_type_selector"]],
+            outputs=[components["accessory_category_selector"]]
+        )
 
-    components["accessory_type_selector"].change(
-        fn=handlers.populate_accessory_category_dropdown,
-        inputs=[components["accessory_type_selector"]],
-        outputs=[components["accessory_category_selector"]]
-    )
+    if "accessory_category_selector" in components:
+        components["accessory_category_selector"].change(
+            fn=handlers.populate_accessory_dropdown,
+            inputs=[components["accessory_type_selector"], components["accessory_category_selector"]],
+            outputs=[components["accessory_dropdown"]]
+        )
 
-    components["accessory_category_selector"].change(
-        fn=handlers.populate_accessory_dropdown,
-        inputs=[components["accessory_type_selector"], components["accessory_category_selector"]],
-        outputs=[components["accessory_dropdown"]]
-    )
+    if "add_accessory_btn" in components:
+        components["add_accessory_btn"].click(
+            fn=handlers.add_accessory_to_character,
+            inputs=[
+                components["character_selector"],
+                components["accessory_dropdown"],
+                components["accessory_type_selector"],
+                components["accessory_category_selector"]
+            ],
+            outputs=[components["accessories_status"], components["accessories_table"]]
+        )
 
     # ===== PROGRAMS TAB EVENTS =====
+    if "program_type_selector" in components:
+        components["program_type_selector"].change(
+            fn=handlers.populate_program_dropdown,
+            inputs=[components["program_type_selector"]],
+            outputs=[components["program_dropdown"]]
+        )
 
-    components["program_type_selector"].change(
-        fn=handlers.populate_program_dropdown,
-        inputs=[components["program_type_selector"]],
-        outputs=[components["program_dropdown"]]
-    )
+    if "add_program_btn" in components:
+        components["add_program_btn"].click(
+            fn=handlers.add_program_to_character,
+            inputs=[
+                components["character_selector"],
+                components["program_dropdown"],
+                components["program_type_selector"],
+                components["program_rating_input"]
+            ],
+            outputs=[components["programs_status"], components["programs_table"]]
+        )
 
-    components["set_cyberdeck_btn"].click(
-        fn=handlers.set_character_cyberdeck,
-        inputs=[components["character_selector"], components["cyberdeck_selector"]],
-        outputs=[
-            components["programs_status"],
-            components["deck_attack"],
-            components["deck_sleaze"],
-            components["deck_data_proc"],
-            components["deck_firewall"]
-        ]
-    )
+    if "set_cyberdeck_btn" in components:
+        components["set_cyberdeck_btn"].click(
+            fn=handlers.set_character_cyberdeck,
+            inputs=[components["character_selector"], components["cyberdeck_selector"]],
+            outputs=[
+                components["programs_status"],
+                components["deck_attack"],
+                components["deck_sleaze"],
+                components["deck_data_proc"],
+                components["deck_firewall"]
+            ]
+        )
 
     # ===== AUTO-POPULATE ON LOAD =====
 
@@ -861,9 +984,16 @@ def wire_equipment_events(components: Dict, handlers: CharacterEquipmentHandlers
         try:
             # Populate cyberdeck dropdown
             cyberdeck_choices = handlers.char_api.get_cyberdecks_dropdown_choices()
+            gear_categories = handlers.char_api.get_gear_categories_dropdown_choices()
 
-            return gr.update(choices=cyberdeck_choices)
+            return (
+                gr.update(choices=cyberdeck_choices),
+                gr.update(choices=gear_categories)
+            )
         except Exception as e:
-            return gr.update(choices=[("Error loading", None)])
+            return (
+                gr.update(choices=[("Error loading", None)]),
+                gr.update(choices=[("Error loading", None)])
+            )
 
     return auto_populate_equipment_dropdowns

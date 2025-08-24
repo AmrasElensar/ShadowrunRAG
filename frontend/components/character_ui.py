@@ -645,6 +645,10 @@ class CharacterEventHandlers:
             logger.error(f"Failed to populate reference data: {e}")
             return f"❌ Error: {str(e)}"
 
+    def get_equipment_handlers(self):
+        """Get equipment event handlers instance."""
+        return CharacterEquipmentHandlers(self.char_api)
+
 
 def wire_character_events(components: Dict, handlers: CharacterEventHandlers):
     """Wire up all character management events - ORGANIZED AND CLEAN."""
@@ -732,6 +736,15 @@ def wire_character_events(components: Dict, handlers: CharacterEventHandlers):
         fn=handlers.populate_reference_data,
         outputs=[components["utility_status"]]
     )
+
+    equipment_components = {k: v for k, v in components.items()
+                            if any(prefix in k for prefix in ['gear_', 'weapon_', 'vehicle_',
+                                                              'armor_', 'accessory_', 'program_',
+                                                              'cyberdeck_', 'deck_'])}
+
+    if equipment_components:
+        equipment_handlers = handlers.get_equipment_handlers()
+        wire_equipment_events(equipment_components, equipment_handlers)
 
     # Auto-populate dropdowns on app load
     def auto_populate_initial_data():
