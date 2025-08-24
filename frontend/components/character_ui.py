@@ -7,6 +7,7 @@ import gradio as gr
 import logging
 from typing import Dict
 from frontend.api_clients.character_client import CharacterAPIClient
+from frontend.components.character_equipment_ui import CharacterEquipmentUI, CharacterEquipmentHandlers, wire_equipment_events
 
 logger = logging.getLogger(__name__)
 
@@ -464,8 +465,9 @@ class CharacterUI:
                         # Qualities tab
                         qualities_components = self.build_qualities_tab()
 
-                        # Gear tab
-                        gear_components = self.build_gear_tab()
+                        with gr.Tab("🎒 Equipment"):
+                            equipment_ui = CharacterEquipmentUI(self.char_api)
+                            equipment_components = equipment_ui.build_equipment_tabs_section()
 
             # Bottom utilities section
             utility_components = self.build_utility_section()
@@ -476,7 +478,7 @@ class CharacterUI:
                 **stats_components,
                 **skills_components,
                 **qualities_components,
-                **gear_components,
+                **equipment_components,
                 **utility_components
             }
 
