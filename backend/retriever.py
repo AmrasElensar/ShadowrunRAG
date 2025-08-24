@@ -40,8 +40,8 @@ class Retriever:
     ):
         self.chroma_path = chroma_path or os.getenv("CHROMA_DB_PATH", "data/chroma_db")
         self.collection_name = collection_name or os.getenv("COLLECTION_NAME", "shadowrun_docs")
-        self.embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
-        self.llm_model = llm_model or os.getenv("LLM_MODEL", "llama3:8b-instruct-q4_K_M")
+        self.embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL", "mxbai-embed-large")
+        self.llm_model = llm_model or os.getenv("LLM_MODEL", "phi4-reasoning:plus")
 
         self.client = chromadb.PersistentClient(
             path=self.chroma_path,
@@ -86,15 +86,15 @@ class Retriever:
             })
         elif query_type == "session":
             options.update({
-                "temperature": 0.9,  # Slightly lower - still creative but more coherent
-                "top_p": 0.95,  # Good as-is
-                "max_tokens": 2048  # Keep as-is for creative generation
+                "temperature": 0.9,
+                "top_p": 0.95,
+                "max_tokens": 2048
             })
         else:  # "character", "general", or default
             options.update({
-                "temperature": 0.8,  # Lower for more consistent responses
-                "top_p": 0.95,  # Tighter sampling
-                "max_tokens": 1024  # Good as-is
+                "temperature": 0.8,
+                "top_p": 0.95,
+                "max_tokens": 1024
             })
 
         logger.debug(f"Using {query_type} settings: temp={options['temperature']}")
@@ -573,7 +573,7 @@ class Retriever:
             character_stats: Optional[str] = None,
             edition: Optional[str] = "SR5",  # Default to SR5
             model: Optional[str] = None,
-            fetch_linked_chunks: bool = True
+            fetch_linked_chunks: bool = False
     ):
         """Enhanced streaming query with complete filter logic and linked chunk fetching."""
 

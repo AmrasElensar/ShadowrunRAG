@@ -35,8 +35,8 @@ class IncrementalIndexer:
         self,
         chroma_path: str = "data/chroma_db",
         collection_name: str = "shadowrun_docs",
-        embedding_model: str = "nomic-embed-text",
-        chunk_size: int = 2024,           # Increased from 512 for better performance
+        embedding_model: str = "mxbai-embed-large",
+        chunk_size: int = 1024,           # Increased from 512 for better performance
         chunk_overlap: int = 150,         # Increased proportionally
         use_semantic_splitting: bool = True
     ):
@@ -49,9 +49,14 @@ class IncrementalIndexer:
             settings=Settings(anonymized_telemetry=False)
         )
 
+        # mxbai-embed-large uses 1024-dimensional embeddings
+        embedding_dimension = 1024
+
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
-            metadata={"hnsw:space": "cosine"}
+            metadata={"hnsw:space": "cosine",
+                      "dimension": str(embedding_dimension)
+            }
         )
 
         self.embedding_model = embedding_model
