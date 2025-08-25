@@ -49,14 +49,9 @@ class IncrementalIndexer:
             settings=Settings(anonymized_telemetry=False)
         )
 
-        # mxbai-embed-large uses 1024-dimensional embeddings
-        embedding_dimension = 1024
-
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
-            metadata={"hnsw:space": "cosine",
-                      "dimension": str(embedding_dimension)
-            }
+            metadata={"hnsw:space": "cosine"}
         )
 
         self.embedding_model = embedding_model

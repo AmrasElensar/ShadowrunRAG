@@ -1268,6 +1268,31 @@ async def debug_context_as_text(
         headers={"Content-Type": "text/plain; charset=utf-8"}
     )
 
+
+@app.get("/debug/collection-info")
+async def debug_collection():
+    try:
+        count = retriever.collection.count()
+
+        if count > 0:
+            sample = retriever.collection.peek(limit=1)
+
+            if sample and 'embeddings' in sample and len(sample['embeddings']) > 0:
+                embedding_dim = len(sample['embeddings'][0])
+                return {
+                    "collection_name": retriever.collection.name,
+                    "embedding_dimension": embedding_dim,
+                    "document_count": count,
+                    "sample_metadata": sample['metadatas'][0] if sample['metadatas'] else None
+                }
+            else:
+                return {"error": "No embeddings found", "sample_keys": list(sample.keys()) if sample else None}
+        else:
+            return {"error": "Empty collection"}
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
