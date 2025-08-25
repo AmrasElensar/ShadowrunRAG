@@ -1293,6 +1293,32 @@ async def debug_collection():
         import traceback
         return {"error": str(e), "traceback": traceback.format_exc()}
 
+
+@app.get("/debug/metadata-values")
+async def debug_metadata_values():
+    """See what metadata values actually exist in ChromaDB"""
+    try:
+        # Get a sample of documents to see metadata structure
+        sample = retriever.collection.peek(limit=20)
+
+        main_sections = set()
+        editions = set()
+
+        for metadata in sample['metadatas']:
+            if metadata:
+                if 'main_section' in metadata:
+                    main_sections.add(metadata['main_section'])
+                if 'edition' in metadata:
+                    editions.add(metadata['edition'])
+
+        return {
+            "main_sections": list(main_sections),
+            "editions": list(editions),
+            "sample_metadata": sample['metadatas'][:3]  # First 3 for inspection
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

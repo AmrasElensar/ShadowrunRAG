@@ -107,6 +107,8 @@ class RAGQueryUI:
                 allow_custom_value=True
             )
 
+            refresh_models_btn = gr.Button("🔄 Refresh models", size="sm")
+
             # Results configuration
             n_results_slider = gr.Slider(
                 minimum=1, maximum=10, value=5, step=1,
@@ -127,6 +129,7 @@ class RAGQueryUI:
 
             return {
                 "model_select": model_select,
+                "refresh_models_btn": refresh_models_btn,
                 "n_results_slider": n_results_slider,
                 "query_type_select": query_type_select,
                 **character_components,
@@ -403,6 +406,15 @@ class RAGQueryHandlers:
         return create_info_message(
             f"Active character: {selected_char['name']} - queries will include character context")
 
+    def refresh_models(self):
+        """Refresh available models from the backend."""
+        try:
+            models = self.rag_client.get_models()
+            return gr.update(choices=models, value=models[0] if models else "llama3:8b-instruct-q4_K_M")
+        except Exception as e:
+            logger.error(f"Failed to refresh models: {e}")
+            return gr.update(choices=["llama3:8b-instruct-q4_K_M"], value="llama3:8b-instruct-q4_K_M")
+
 
 def wire_query_events(components: Dict, handlers: RAGQueryHandlers):
     """Wire up RAG query event handlers."""
@@ -444,6 +456,11 @@ def wire_query_events(components: Dict, handlers: RAGQueryHandlers):
         fn=handlers.handle_character_selection_for_query,
         inputs=[components["character_query_selector"]],
         outputs=[components["character_context_display"]]
+    )
+
+    components["refresh_models_btn"].click(
+        fn=handlers.refresh_models,
+        outputs=[components["model_select"]]
     )
 
     return components

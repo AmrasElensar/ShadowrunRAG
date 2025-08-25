@@ -54,7 +54,7 @@ class RAGClient:
                 f"{self.api_url}/query_stream",
                 json={"question": question, **params},
                 stream=True,
-                timeout=30
+                timeout=300
             )
             response.raise_for_status()
 

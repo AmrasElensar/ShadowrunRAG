@@ -80,20 +80,20 @@ class Retriever:
         # Enhanced settings for different query types
         if query_type == "rules":
             options.update({
-                "temperature": 0.8,
-                "top_p": 0.95,
+                "temperature": 1,
+                "top_p": 1,
                 "max_tokens": 1024,
             })
         elif query_type == "session":
             options.update({
-                "temperature": 0.9,
-                "top_p": 0.95,
+                "temperature": 1,
+                "top_p": 1,
                 "max_tokens": 2048
             })
         else:  # "character", "general", or default
             options.update({
-                "temperature": 0.8,
-                "top_p": 0.95,
+                "temperature": 1,
+                "top_p": 1,
                 "max_tokens": 1024
             })
 
@@ -121,24 +121,31 @@ class Retriever:
 
             logger.info(f"Character role '{character_role}' overrode section filter → '{role_section}'")
 
-        # Convert to ChromaDB format - use simple equality for single filters
+        # Convert to ChromaDB format
         if final_filter:
-            if len(final_filter) == 1:
-                # Single filter - return as simple key-value pair
-                key, value = next(iter(final_filter.items()))
-                chroma_filter = {key: value}
-            else:
-                # Multiple filters - use $and with simple equality
-                and_conditions = []
-                for key, value in final_filter.items():
-                    and_conditions.append({key: value})
-                chroma_filter = {"$and": and_conditions}
-
+            # ChromaDB uses implicit AND for multiple conditions
+            chroma_filter = final_filter  # Just use the dict directly
             logger.info(f"Final enhanced filter (ChromaDB format): {chroma_filter}")
             return chroma_filter
         else:
             logger.info("No filters applied")
             return None
+
+    def format_filter_for_chromadb(self, filter_dict: Dict) -> Dict:
+        """Convert simple dict to ChromaDB 1.0.16 filter format."""
+        if not filter_dict:
+            return {}
+
+        if len(filter_dict) == 1:
+            # Single condition
+            key, value = next(iter(filter_dict.items()))
+            return {key: {'$eq': value}}
+        else:
+            # Multiple conditions - use $and
+            conditions = []
+            for key, value in filter_dict.items():
+                conditions.append({key: {'$eq': value}})
+            return {'$and': conditions}
 
     def search(
             self,
@@ -155,6 +162,9 @@ class Retriever:
             # Build enhanced filter with character role precedence
             enhanced_filter = self.build_enhanced_filter(character_role, where_filter)
 
+            if enhanced_filter:
+                enhanced_filter = self.format_filter_for_chromadb(enhanced_filter)
+
             # Build query parameters
             query_params = {
                 "query_embeddings": [query_embedding],
@@ -164,6 +174,9 @@ class Retriever:
             # Only add where filter if it has actual conditions
             if enhanced_filter and len(enhanced_filter) > 0:
                 query_params["where"] = enhanced_filter
+
+            logger.info(f"Enhanced filter before query: {enhanced_filter}")
+            logger.info(f"Enhanced filter type: {type(enhanced_filter)}")
 
             results = self.collection.query(**query_params)
 
@@ -285,9 +298,11 @@ class Retriever:
             fetch_linked: bool = False
     ) -> Dict:
         """Enhanced search that automatically fetches linked chunks."""
+        # Enhance query based on classification
+        enhanced_question = self.enhance_query_with_classification(question)
 
-        # First, do the normal search
-        primary_results = self.search(question, n_results, where_filter, character_role)
+        # First, do the normal search with enhanced query
+        primary_results = self.search(enhanced_question, n_results, where_filter, character_role)
 
         if not fetch_linked or not primary_results['documents']:
             return primary_results
@@ -659,3 +674,93 @@ class Retriever:
         except Exception as e:
             logger.error(f"Metadata analysis failed: {e}")
             return {"error": str(e)}
+
+    def classify_shadowrun_query(self, query_text: str) -> str:
+        """Classify Shadowrun queries based on actual game mechanics and terminology."""
+        query_lower = query_text.lower()
+
+        rule_classifications = {
+            "damage_resistance": [
+                "damage", "resistance", "resist", "soak", "armor", "condition monitor",
+                "physical damage", "stun damage", "overflow", "wound modifier", "dice pool"
+            ],
+            "matrix": [
+                "matrix", "hack", "cyberdeck", "decker", "firewall", "attack", "sleaze",
+                "data processing", "ic", "host", "biofeedback", "dumpshock", "overwatch",
+                "device rating", "matrix damage", "silent running", "marks", "black ic"
+            ],
+            "magic": [
+                "spell", "magic", "drain", "force", "mana", "astral", "summoning",
+                "spirit", "adept", "mage", "enchanting", "focus", "reagents"
+            ],
+            "combat": [
+                "combat", "initiative", "action phase", "attack", "defense", "cover",
+                "melee", "ranged", "full auto", "burst fire", "called shot", "reach"
+            ],
+            "dice_pools": [
+                "dice pool", "dice", "roll", "attribute", "skill", "threshold",
+                "modifier", "bonus", "penalty", "glitch", "test"
+            ]
+        }
+
+        # Score each category
+        category_scores = {}
+        for category, keywords in rule_classifications.items():
+            score = sum(1 for keyword in keywords if keyword in query_lower)
+            if score > 0:
+                category_scores[category] = score
+
+        query_category = max(category_scores, key=category_scores.get) if category_scores else "general"
+        logger.info(f"Query classified as: {query_category}")
+
+        return query_category
+
+    def enhance_query_with_classification(self, original_query: str) -> str:
+        """Enhance query with relevant terms based on classification to improve ChromaDB retrieval."""
+
+        # Get the classification
+        category = self.classify_shadowrun_query(original_query)
+
+        # Enhancement terms for each category
+        enhancement_terms = {
+            "damage_resistance": "Device Rating Firewall damage resistance soak armor condition monitor",
+            "matrix": "matrix cyberdeck firewall biofeedback decker attack sleaze data processing",
+            "magic": "spell drain force mana magic astral summoning spirit",
+            "combat": "initiative combat attack defense armor penetration melee ranged",
+            "dice_pools": "attribute skill dice pool threshold modifier test roll",
+            "rigging": "rigger drone vehicle pilot jumped control rig autosofts"
+        }
+
+        if category in enhancement_terms:
+            enhanced_query = f"{original_query} {enhancement_terms[category]}"
+            logger.info(f"Query enhanced: '{original_query}' -> category: {category}")
+            return enhanced_query
+
+        logger.info(f"Query classified as: {category} (no enhancement)")
+        return original_query
+
+    def boost_chunks_by_category(self, search_results: Dict, category: str) -> Dict:
+        """Boost chunk rankings based on detected query category."""
+        if category == "general":
+            return search_results
+
+        boost_terms = {
+            "damage_resistance": ["Device Rating + Firewall", "Willpower + Firewall", "Body + Armor"],
+            "matrix": ["Device Rating + Firewall", "Willpower + Firewall", "biofeedback", "matrix damage"],
+            "dice_pools": ["Attribute + Skill", "dice pool", "threshold", "net hits"],
+            "combat": ["Initiative", "Defense", "armor penetration", "damage code"],
+            "magic": ["Drain Value", "Force", "Magic + Skill", "astral plane"]
+        }
+
+        if category not in boost_terms:
+            return search_results
+
+        # Boost chunks containing relevant terms
+        terms_to_boost = boost_terms[category]
+        for i, document in enumerate(search_results['documents']):
+            boost_score = sum(1 for term in terms_to_boost if term.lower() in document.lower())
+            if boost_score > 0:
+                # Improve the distance (lower = better ranking)
+                search_results['distances'][i] *= (1 - (boost_score * 0.1))  # Up to 50% boost
+
+        return search_results
