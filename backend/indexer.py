@@ -9,6 +9,7 @@ from chromadb.config import Settings
 import ollama
 from tqdm import tqdm
 import logging
+from tools.improved_classifier import ImprovedShadowrunClassifier
 
 # Check for optional dependencies
 try:
@@ -87,131 +88,29 @@ class IncrementalIndexer:
         return hashlib.md5(file_path.read_bytes()).hexdigest()
 
     def _extract_shadowrun_metadata(self, content: str, source: str) -> Dict:
-        """Extract Shadowrun-specific metadata from content with enhanced fields."""
-        metadata = {
-            "source": source,
-            "document_type": "unknown",
-            "edition": "unknown",
-            "main_section": "General",
-            "subsection": "General",
-            # NEW: Enhanced fields for chunking
-            "section_id": None,
-            "section_title": None,
-            "chunk_index": None,
-            "total_chunks_in_section": None,
-            "section_complete": None,
-            "prev_chunk_global": None,
-            "next_chunk_global": None,
-            "prev_chunk_section": None,
-            "next_chunk_section": None,
-            "chunk_id": None,
-            "continuation_of": None,
-            "token_count": None
-        }
+        """REPLACE this entire function with the improved version."""
 
-        # Existing detection logic stays the same...
-        filename = Path(source).name.lower()
-        content_lower = content[:2000].lower()
+        # Import the improved classifier at the top of indexer.py:
+        # from tools.improved_classifier import ImprovedShadowrunClassifier
 
-        # Document type detection (existing code)
-        if any(term in filename for term in ["character", "sheet", "pc", "npc"]):
-            metadata["document_type"] = "character_sheet"
-        elif any(term in content_lower for term in
-                 ["character creation", "priority system", "attribute", "skill points"]):
-            metadata["document_type"] = "character_sheet"
-        elif any(term in filename for term in ["core", "rulebook", "rules", "manual"]):
-            metadata["document_type"] = "rulebook"
-        elif any(term in content_lower for term in ["combat", "initiative", "damage", "armor", "weapon"]):
-            metadata["document_type"] = "rulebook"
-        else:
-            metadata["document_type"] = "universe_info"
+        if not hasattr(self, '_improved_classifier'):
+            from tools.improved_classifier import ImprovedShadowrunClassifier
+            self._improved_classifier = ImprovedShadowrunClassifier()
 
-        # Edition detection (existing code)
-        if "shadowrun 6" in content_lower or "6th edition" in content_lower or "sr6" in content_lower:
-            metadata["edition"] = "SR6"
-        elif "shadowrun 5" in content_lower or "5th edition" in content_lower or "sr5" in content_lower:
-            metadata["edition"] = "SR5"
-        elif "shadowrun 4" in content_lower or "4th edition" in content_lower or "sr4" in content_lower:
-            metadata["edition"] = "SR4"
-        elif "shadowrun 3" in content_lower or "3rd edition" in content_lower or "sr3" in content_lower:
-            metadata["edition"] = "SR3"
-
-        # Section detection (existing code - now serves as fallback)
-        section_keywords = {
-            "Combat": ["combat", "initiative", "damage", "armor", "weapon", "attack", "defense", "wound"],
-            "Magic": ["magic", "spell", "astral", "summoning", "enchanting", "adept", "mage", "spirit"],
-            "Matrix": ["matrix", "hacking", "cyberdeck", "programs", "ic", "host", "decker", "technomancer"],
-            "Riggers": ["rigger", "drone", "vehicle", "pilot", "autosofts", "jumped in"],
-            "Gear": ["gear", "equipment", "cyberware", "bioware", "weapons", "armor", "electronics"],
-            "Character Creation": ["character creation", "priority", "attributes", "skills", "metatype",
-                                   "build points"],
-            "Gamemaster": ["gamemaster", "gm", "adventure", "npc", "campaign", "plot", "scenario"],
-            "Setting": ["seattle", "sixth world", "corporations", "shadowrun", "awakening", "crash"]
-        }
-
-        for section, keywords in section_keywords.items():
-            if any(keyword in content_lower for keyword in keywords):
-                metadata["main_section"] = section
-                break
-
-        return metadata
+        return self._improved_classifier.classify_content(content, source)
 
     def _chunk_text_semantic(self, text: str, source: str) -> List[Dict]:
-        """Simplified semantic chunking: Split by # boundaries, simple paragraph fallback."""
+        """REPLACE this entire function with the improved version."""
+
         if not self.use_semantic_splitting:
             return self._chunk_text_simple(text, source)
 
-        # Extract base metadata for all chunks
-        base_metadata = self._extract_shadowrun_metadata(text, source)
+        # Import the improved chunker
+        if not hasattr(self, '_improved_chunker'):
+            from tools.improved_classifier import ImprovedSemanticChunker
+            self._improved_chunker = ImprovedSemanticChunker(chunk_size=800, overlap=100)
 
-        # Split by single # headers (major sections)
-        main_sections = self._split_by_main_headers(text)
-
-        if not main_sections:
-            # Fallback to simple chunking if no headers found
-            logger.warning(f"No main headers found in {source}, using simple chunking")
-            return self._chunk_text_simple(text, source)
-
-        final_chunks = []
-
-        for section_data in main_sections:
-            section_title = section_data['title']
-            section_content = section_data['content']
-            section_id = self._generate_section_id(section_title)
-
-            # Check if section fits in one chunk (2048 tokens)
-            token_count = self._count_tokens(section_content)
-
-            if token_count <= 2048:
-                # Single chunk for this section
-                chunk_metadata = {
-                    **base_metadata,
-                    "section_id": section_id,
-                    "section_title": section_title,
-                    "chunk_index": 0,
-                    "total_chunks_in_section": 1,
-                    "section_complete": True,
-                    "token_count": token_count
-                }
-
-                final_chunks.append({
-                    "text": section_content,
-                    "source": source,
-                    "metadata": chunk_metadata
-                })
-
-            else:
-                # Split large section with simple paragraph splitting
-                sub_chunks = self._split_large_section_simple(
-                    section_content, section_title, section_id, base_metadata, source
-                )
-                final_chunks.extend(sub_chunks)
-
-        # Add prev/next chunk linking across all chunks
-        self._add_sequential_links(final_chunks)
-
-        logger.info(f"Created {len(final_chunks)} chunks from {len(main_sections)} main sections")
-        return final_chunks
+        return self._improved_chunker.chunk_document(text, source, self._count_tokens)
 
     def _split_by_main_headers(self, text: str) -> List[Dict]:
         """Split text by main headers (# ), preserving all content."""
@@ -486,41 +385,75 @@ class IncrementalIndexer:
             # Enhanced metadata distribution logging
             doc_types = {}
             editions = {}
-            sections = {}
+            sections = {}  # This will now be multi-label
+            primary_sections = {}
+            content_types = {}
             chunk_links = 0
-            section_distribution = {}
 
             for meta in metadatas:
-                # Existing logging
-                doc_types[meta.get('document_type', 'unknown')] = doc_types.get(meta.get('document_type', 'unknown'),
-                                                                                0) + 1
-                editions[meta.get('edition', 'unknown')] = editions.get(meta.get('edition', 'unknown'), 0) + 1
-                sections[meta.get('main_section', 'unknown')] = sections.get(meta.get('main_section', 'unknown'), 0) + 1
+                # Document types
+                doc_type = meta.get('document_type', 'unknown')
+                doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
 
-                # NEW: Enhanced logging
+                # Editions
+                edition = meta.get('edition', 'unknown')
+                editions[edition] = editions.get(edition, 0) + 1
+
+                # Multi-label sections (NEW)
+                sections_list = meta.get('sections', [])
+                if isinstance(sections_list, str):
+                    sections_list = sections_list.split(',')
+
+                for section in sections_list:
+                    section = section.strip()
+                    sections[section] = sections.get(section, 0) + 1
+
+                # Primary sections
+                primary = meta.get('primary_section', 'General')
+                primary_sections[primary] = primary_sections.get(primary, 0) + 1
+
+                # Content types (NEW)
+                content_type = meta.get('content_type', 'general')
+                content_types[content_type] = content_types.get(content_type, 0) + 1
+
+                # Chunk links
                 if meta.get('next_chunk_global') or meta.get('prev_chunk_global'):
                     chunk_links += 1
 
-                section_id = meta.get('section_id')
-                if section_id:
-                    section_distribution[section_id] = section_distribution.get(section_id, 0) + 1
-
             logger.info(f"Document types: {doc_types}")
             logger.info(f"Editions: {editions}")
-            logger.info(f"Sections: {sections}")
+            logger.info(f"Primary sections: {primary_sections}")
+            logger.info(f"All sections (multi-label): {dict(list(sections.items())[:10])}")  # Show top 10
+            logger.info(f"Content types: {content_types}")
             logger.info(f"Chunks with sequential links: {chunk_links}/{len(metadatas)}")
-            logger.info(f"Section distribution: {len(section_distribution)} unique sections")
 
-            # Log example section for debugging
-            if section_distribution:
-                example_section = list(section_distribution.keys())[0]
-                example_count = section_distribution[example_section]
-                logger.info(f"Example: Section '{example_section}' has {example_count} chunks")
+            # Log classification quality metrics
+            unique_sections = len(sections)
+            total_classifications = sum(sections.values())
+            classification_diversity = unique_sections / len(metadatas) * 100 if metadatas else 0
+
+            logger.info(
+                f"Classification diversity: {classification_diversity:.1f}% ({unique_sections} unique sections)")
+
+            # Log content type distribution
+            rules_count = content_types.get('explicit_rule', 0)
+            examples_count = content_types.get('example', 0)
+            tables_count = content_types.get('table_header', 0)
+
+            logger.info(
+                f"Content analysis: {rules_count} explicit rules, {examples_count} examples, {tables_count} tables")
+
+            # Warn about classification issues
+            if classification_diversity < 5:
+                logger.warning("⚠️ Low classification diversity - check classification patterns")
+
+            if primary_sections.get('Combat', 0) / len(metadatas) > 0.8:
+                logger.warning("⚠️ Over 80% classified as Combat - classification may be broken")
 
         self._save_index_metadata()
 
     def _clean_metadata_for_chromadb(self, metadatas: List[Dict]) -> List[Dict]:
-        """Clean metadata to remove None values and ensure ChromaDB compatibility."""
+        """UPDATED to handle new metadata fields."""
         cleaned_metadatas = []
 
         for metadata in metadatas:
@@ -531,12 +464,22 @@ class IncrementalIndexer:
                 if value is None:
                     continue
 
-                # Ensure all values are basic types (str, int, float, bool)
-                if isinstance(value, (str, int, float, bool)):
+                # Handle lists (convert to comma-separated strings)
+                if isinstance(value, list):
+                    if value:  # Only if list is not empty
+                        cleaned[key] = ",".join(str(item) for item in value if item is not None)
+                    continue
+
+                # Handle dictionaries (convert to JSON strings)
+                elif isinstance(value, dict):
+                    if value:  # Only if dict is not empty
+                        import json
+                        cleaned[key] = json.dumps(value)
+                    continue
+
+                # Handle basic types
+                elif isinstance(value, (str, int, float, bool)):
                     cleaned[key] = value
-                elif isinstance(value, list):
-                    # Convert lists to comma-separated strings
-                    cleaned[key] = ",".join(str(item) for item in value if item is not None)
                 else:
                     # Convert other types to string
                     cleaned[key] = str(value)

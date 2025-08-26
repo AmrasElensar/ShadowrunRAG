@@ -277,14 +277,41 @@ class UploadHandlers:
             return f"### 📊 Processing Status\n\n{error_msg}", gr.update(visible=False), "Error occurred"
 
     def reindex_documents(self, force_reindex: bool) -> str:
-        """Trigger document reindexing."""
+        """Trigger document reindexing through existing backend API."""
         try:
-            # This would call your backend reindex endpoint
-            operation = "full reindex" if force_reindex else "index new documents"
+            operation = "full reindex" if force_reindex else "incremental index"
 
-            # For now, return a placeholder - you'd implement the actual API call
-            return f"🔄 {operation.title()} operation would be triggered here.\n" \
-                   f"⚠️ Implement backend reindex endpoint call."
+            # Show immediate feedback
+            status_msg = f"🔄 Starting {operation}...\n\n"
+
+            # Call your existing backend API
+            result = self.rag_client.reindex(force=force_reindex)
+
+            if "error" in result:
+                return f"❌ **{operation.title()} Failed**\n\n" \
+                       f"Error: {result['error']}"
+
+            # Handle your existing response format
+            if result.get("status") == "success":
+                status_msg += f"✅ **{result.get('message', 'Indexing completed')}**\n\n"
+
+                if force_reindex:
+                    status_msg += f"🔥 **Full reindex completed** - all documents re-processed with improved classification!\n\n"
+                else:
+                    status_msg += f"📈 **Incremental index completed** - new/changed files processed.\n\n"
+
+                status_msg += f"💡 **Next steps:**\n"
+                status_msg += f"   • Test your taser query in the Query tab\n"
+                status_msg += f"   • Run chunk analyzer to see improvements\n"
+                status_msg += f"   • Check classification diversity increased\n"
+            else:
+                status_msg += f"✅ **{operation.title()} Triggered**\n\n{result}"
+
+            return status_msg
+
+        except Exception as e:
+            error_msg = f"❌ **{operation.title()} Failed**\n\nError: {str(e)}"
+            return error_msg
 
         except Exception as e:
             error_msg = UIErrorHandler.handle_exception(e, f"reindexing ({'full' if force_reindex else 'incremental'})")

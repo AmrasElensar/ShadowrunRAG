@@ -1253,7 +1253,7 @@ async def debug_context_as_text(
         n_results=5,
         where_filter=enhanced_filter,
         character_role=character_role,
-        fetch_linked=False
+        fetch_linked=True
     )
 
     if not search_results['documents']:

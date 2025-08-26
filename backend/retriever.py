@@ -331,7 +331,7 @@ class Retriever:
             n_results: int = 5,
             where_filter: Optional[Dict] = None,
             character_role: Optional[str] = None,
-            fetch_linked: bool = False
+            fetch_linked: bool = True
     ) -> Dict:
         """Enhanced search that automatically fetches linked chunks."""
         # Enhance query based on classification
@@ -623,7 +623,7 @@ class Retriever:
             character_stats: Optional[str] = None,
             edition: Optional[str] = "SR5",  # Default to SR5
             model: Optional[str] = None,
-            fetch_linked_chunks: bool = False
+            fetch_linked_chunks: bool = True
     ):
         """Enhanced streaming query with complete filter logic and linked chunk fetching."""
 
