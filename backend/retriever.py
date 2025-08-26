@@ -25,6 +25,39 @@ except ImportError as e:
             "Answer:"
         )
 
+MODEL_SETTINGS = {
+    "llama3:8b-instruct-q4_K_M": {
+        "general": {
+            "temperature": 0.6,
+            "top_p": 0.9
+        }
+    },
+    "qwen2.5:14b-instruct-q6_K": {
+        "general": {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "repetition_penalty": 1.05
+        }
+    },
+    "mistral-nemo:12b": {
+        "general": {
+            "temperature": 0.3
+        }
+    },
+    "deepseek-r1:14b": {
+        "general": {
+            "temperature": 0.6,
+            "top_p": 0.95
+        }
+    },
+    "deepseek-r1:8b": {
+        "general": {
+            "temperature": 0.6,
+            "top_p": 0.95
+        }
+    }
+}
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -73,31 +106,32 @@ class Retriever:
         logger.info(f"Context window: {self.base_model_options['num_ctx']} tokens")
         logger.info(f"Character role mappings: {self.role_to_section_map}")
 
-    def get_model_options(self, query_type: str) -> dict:
-        """Enhanced model options with better parameter tuning."""
+    def get_model_options(self, query_type: str, model: str = None) -> dict:
+        """Enhanced model options with per-model, per-query-type settings."""
+        # Start with base defaults (only what you specify)
         options = self.base_model_options.copy()
 
-        # Enhanced settings for different query types
-        if query_type == "rules":
-            options.update({
-                "temperature": 1,
-                "top_p": 1,
-                "max_tokens": 1024,
-            })
-        elif query_type == "session":
-            options.update({
-                "temperature": 1,
-                "top_p": 1,
-                "max_tokens": 2048
-            })
-        else:  # "character", "general", or default
-            options.update({
-                "temperature": 1,
-                "top_p": 1,
-                "max_tokens": 1024
-            })
+        model_to_check = model or self.llm_model
 
-        logger.debug(f"Using {query_type} settings: temp={options['temperature']}")
+        if model_to_check in MODEL_SETTINGS:
+            model_config = MODEL_SETTINGS[model_to_check]
+
+            # Try specific query type first, fall back to "general"
+            if query_type in model_config:
+                query_settings = model_config[query_type]
+            elif "general" in model_config:
+                query_settings = model_config["general"]
+                logger.debug(f"Query type '{query_type}' not found for {model_to_check}, using 'general'")
+            else:
+                query_settings = {}
+                logger.debug(f"No settings found for {model_to_check}, using defaults only")
+
+            options.update(query_settings)
+            logger.debug(f"Applied {query_type} settings for {model_to_check}: {query_settings}")
+        else:
+            logger.debug(f"Unknown model {model_to_check}, using defaults only")
+
+        logger.debug(f"Final {query_type} settings for {model_to_check}: {dict(options)}")
         return options
 
     def build_enhanced_filter(
@@ -211,7 +245,7 @@ class Retriever:
             model: str = None
     ) -> str:
         """Generate complete answer as string (non-streaming)."""
-        model_options = self.get_model_options(query_type)
+        model_options = self.get_model_options(query_type, model)  # Pass model parameter
         if custom_options:
             model_options.update(custom_options)
 
@@ -239,12 +273,14 @@ class Retriever:
             model: str = None
     ):
         """Generate answer as streaming generator with enhanced error handling."""
-        model_options = self.get_model_options(query_type)
+        model_options = self.get_model_options(query_type, model)  # Pass model parameter
         if custom_options:
             model_options.update(custom_options)
 
         # Use passed model or fall back to default
         model_to_use = model or self.llm_model
+
+        logger.info(f"Model {model_to_use} used with options: {model_options}")
 
         try:
             response = ollama.generate(
@@ -549,7 +585,6 @@ class Retriever:
         answer = self.generate_answer(
             prompt=prompt,
             query_type=query_type,
-            custom_options={"temperature": self.get_model_options(query_type)["temperature"]},
             model=model
         )
 
@@ -632,7 +667,6 @@ class Retriever:
         for token in self.generate_answer_stream(
                 prompt=prompt,
                 query_type=query_type,
-                custom_options={"temperature": self.get_model_options(query_type)["temperature"]},
                 model=model
         ):
             yield token
