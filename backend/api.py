@@ -1250,7 +1250,7 @@ async def debug_context_as_text(
 
     search_results = retriever.search_with_linked_chunks(
         query,
-        n_results=5,
+        n_results=10,
         where_filter=enhanced_filter,
         character_role=character_role,
         fetch_linked=True
@@ -1317,6 +1317,59 @@ async def debug_metadata_values():
             "sample_metadata": sample['metadatas'][:3]  # First 3 for inspection
         }
     except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/debug/retrieval")
+async def debug_retrieval(request: dict):
+    """Debug endpoint to test retrieval with specific filters."""
+    try:
+        query = request.get("query", "")
+        n_results = request.get("n_results", 5)
+
+        # Build filter from request
+        where_filter = {}
+        if request.get("main_section"):
+            where_filter["main_section"] = request["main_section"]
+        if request.get("content_type"):
+            where_filter["content_type"] = request["content_type"]
+        if request.get("document_type"):
+            where_filter["document_type"] = request["document_type"]
+        if request.get("contains_rules") is not None:
+            where_filter["is_rule_definition"] = request["contains_rules"]
+
+        logger.info(f"Debug retrieval with filter: {where_filter}")
+
+        # Direct retriever call
+        results = retriever.search_with_linked_chunks(
+            question=query,
+            n_results=n_results,
+            where_filter=where_filter if where_filter else None,
+            fetch_linked=True
+        )
+
+        # Return detailed results
+        response = {
+            "query": query,
+            "filter_applied": where_filter,
+            "total_results": len(results.get('documents', [])),
+            "chunks": []
+        }
+
+        for i, (doc, meta) in enumerate(zip(results.get('documents', []), results.get('metadatas', []))):
+            response["chunks"].append({
+                "index": i,
+                "classification": meta.get('main_section', 'Unknown'),
+                "content_type": meta.get('content_type', 'unknown'),
+                "contains_rules": meta.get('is_rule_definition', False),
+                "word_count": len(doc.split()),
+                "preview": doc[:200] + "..." if len(doc) > 200 else doc
+            })
+
+        return response
+
+    except Exception as e:
+        logger.error(f"Debug retrieval error: {e}")
         return {"error": str(e)}
 
 if __name__ == "__main__":

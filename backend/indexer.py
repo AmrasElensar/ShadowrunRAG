@@ -9,7 +9,7 @@ from chromadb.config import Settings
 import ollama
 from tqdm import tqdm
 import logging
-from tools.improved_classifier import ImprovedShadowrunClassifier
+from tools.llm_classifier import create_llm_classifier
 
 # Check for optional dependencies
 try:
@@ -36,7 +36,7 @@ class IncrementalIndexer:
         self,
         chroma_path: str = "data/chroma_db",
         collection_name: str = "shadowrun_docs",
-        embedding_model: str = "mxbai-embed-large",
+        embedding_model: str = "bge-m3",
         chunk_size: int = 1024,           # Increased from 512 for better performance
         chunk_overlap: int = 150,         # Increased proportionally
         use_semantic_splitting: bool = True
@@ -88,16 +88,14 @@ class IncrementalIndexer:
         return hashlib.md5(file_path.read_bytes()).hexdigest()
 
     def _extract_shadowrun_metadata(self, content: str, source: str) -> Dict:
-        """REPLACE this entire function with the improved version."""
+        logger.info("Using NEW LLM-based classification")  # Add this line
 
-        # Import the improved classifier at the top of indexer.py:
-        # from tools.improved_classifier import ImprovedShadowrunClassifier
+        if not hasattr(self, '_llm_classifier'):
+            from tools.llm_classifier import create_llm_classifier
+            self._llm_classifier = create_llm_classifier(model_name="phi4-mini")
+            logger.info("Initialized LLM-based classifier with phi4-mini")
 
-        if not hasattr(self, '_improved_classifier'):
-            from tools.improved_classifier import ImprovedShadowrunClassifier
-            self._improved_classifier = ImprovedShadowrunClassifier()
-
-        return self._improved_classifier.classify_content(content, source)
+        return self._llm_classifier.classify_content(content, source)
 
     def _chunk_text_semantic(self, text: str, source: str) -> List[Dict]:
         """REPLACE this entire function with the improved version."""
