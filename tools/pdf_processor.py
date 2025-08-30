@@ -712,8 +712,10 @@ class EnhancedPDFProcessor:
             logger.error(f"❌ Vision extraction failed: {e}")
             return None
 
+    # Update your _extract_pdf_content method in tools/pdf_processor.py
+
     def _extract_pdf_content(self, pdf_path: Path) -> str:
-        """Main extraction orchestrator: Choose between hybrid 4-tier or pure vision."""
+        """Main extraction orchestrator: Choose between hybrid, vision, or TOC-guided extraction."""
 
         if self.extraction_method == "vision":
             # Pure vision approach
@@ -723,8 +725,16 @@ class EnhancedPDFProcessor:
                 ("PyMuPDF + TOC", self._extract_with_pymupdf_toc, "📚"),
                 ("Basic Text", self._extract_emergency_text, "🆘")
             ]
+        elif self.extraction_method == "toc_guided":
+            # NEW: TOC-guided Marker approach
+            extraction_methods = [
+                ("TOC-Guided Marker", self._extract_with_toc_guided_marker, "📚🎯"),
+                ("Marker GPU Fallback", self._extract_with_marker, "🎯"),  # Fallback
+                ("PyMuPDF + TOC", self._extract_with_pymupdf_toc, "📚"),
+                ("Basic Text", self._extract_emergency_text, "🆘")
+            ]
         else:
-            # Your existing hybrid approach (default)
+            # Default: hybrid approach
             extraction_methods = [
                 ("Marker GPU (NEW API)", self._extract_with_marker, "🎯"),
                 ("PyMuPDF + TOC", self._extract_with_pymupdf_toc, "📚"),
@@ -755,7 +765,8 @@ class EnhancedPDFProcessor:
                     logger.info(f"✅ {method_name} successful in {method_time:.1f}s")
 
                     # Clear GPU cache after GPU methods
-                    if any(gpu_method in method_name for gpu_method in ["Marker GPU", "Vision Model"]):
+                    if any(gpu_method in method_name for gpu_method in
+                           ["Marker GPU", "Vision Model", "TOC-Guided Marker"]):
                         self._clear_gpu_cache()
 
                     return result
@@ -1041,6 +1052,200 @@ extraction_hierarchy: ["marker_gpu_new_api", "pymupdf_toc", "unstructured_emerge
 
         json_meta.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
         logger.debug(f"💾 Saved enhanced metadata: {json_meta}")
+
+    def _extract_with_toc_guided_marker(self, pdf_path: Path) -> Optional[str]:
+        """TOC-guided Marker extraction: Use PyMuPDF for structure, Marker for content quality."""
+        try:
+            if self.progress_callback:
+                self.progress_callback("toc_guided_init", 10, "Starting TOC-guided extraction...")
+
+            logger.info(f"📚🎯 Processing {pdf_path.name} with TOC-guided Marker approach")
+            start_time = time.time()
+
+            # Step 1: Extract TOC structure using PyMuPDF
+            doc = fitz.open(pdf_path)
+            toc_structure = self._extract_toc_structure(doc)
+
+            if not toc_structure:
+                logger.warning("No TOC found, falling back to regular Marker")
+                doc.close()
+                return self._extract_with_marker(pdf_path)
+
+            logger.info(f"📖 Found {len(toc_structure)} TOC entries")
+
+            if self.progress_callback:
+                self.progress_callback("toc_analysis", 20,
+                                       f"Analyzing TOC structure ({len(toc_structure)} sections)...")
+
+            # Step 2: Identify major sections (level 1) like "Combat", "Matrix"
+            major_sections = [entry for entry in toc_structure if entry['level'] == 1]
+            logger.info(f"🗂️ Found {len(major_sections)} major sections")
+
+            all_sections = []
+            total_sections = len(major_sections)
+
+            # Step 3: Process each major section with Marker
+            for idx, section in enumerate(major_sections):
+                section_name = section['title']
+                start_page = section['page']
+
+                # Find end page (start of next section or end of document)
+                end_page = self._get_section_end_page(section, major_sections, doc.page_count)
+
+                progress = 30 + (idx / total_sections) * 60
+                if self.progress_callback:
+                    self.progress_callback("toc_processing", progress,
+                                           f"Processing section: {section_name} (pages {start_page}-{end_page})")
+
+                logger.info(f"📄 Processing '{section_name}': pages {start_page} to {end_page}")
+
+                # Extract this section with Marker
+                section_text = self._extract_marker_section(pdf_path, start_page, end_page)
+
+                if section_text and section_text.strip():
+                    # Add proper section header with TOC title
+                    formatted_section = f"\n\n# {section_name}\n\n{section_text.strip()}"
+                    all_sections.append(formatted_section)
+                    logger.info(f"✅ Processed '{section_name}': {len(section_text)} chars")
+                else:
+                    logger.warning(f"⚠️ Empty content for section: {section_name}")
+
+            doc.close()
+
+            if not all_sections:
+                logger.error("No sections extracted successfully")
+                return None
+
+            # Step 4: Combine all sections
+            full_text = "\n\n---\n\n".join(all_sections)
+            extraction_time = time.time() - start_time
+
+            if self.progress_callback:
+                self.progress_callback("toc_complete", 95,
+                                       f"TOC-guided extraction complete ({extraction_time:.1f}s)")
+
+            logger.info(
+                f"✅ TOC-guided extraction: {len(major_sections)} sections, {len(full_text)} chars in {extraction_time:.1f}s")
+            return full_text
+
+        except Exception as e:
+            logger.error(f"❌ TOC-guided extraction failed: {e}")
+            return None
+
+    def _get_section_end_page(self, current_section: Dict, all_major_sections: List[Dict], total_pages: int) -> int:
+        """Find the end page for a TOC section."""
+        current_page = current_section['page']
+
+        # Find next major section
+        next_sections = [s for s in all_major_sections if s['page'] > current_page]
+
+        if next_sections:
+            # End at the page before next major section
+            return min(next_sections, key=lambda s: s['page'])['page'] - 1
+        else:
+            # Last section goes to end of document
+            return total_pages - 1
+
+    def _extract_marker_section(self, pdf_path: Path, start_page: int, end_page: int) -> Optional[str]:
+        """Extract a specific page range using Marker."""
+        try:
+            # Load Marker converter
+            converter = self._load_marker_converter()
+            if not converter:
+                logger.warning("Could not load Marker converter for section extraction")
+                return self._extract_pymupdf_section(pdf_path, start_page, end_page)
+
+            # For now, we'll use full document Marker and extract the section
+            # TODO: Implement page-range specific Marker extraction if supported
+            logger.info(f"🎯 Using Marker for pages {start_page}-{end_page}")
+
+            # Create a temporary PDF with just these pages
+            temp_section_path = self._create_section_pdf(pdf_path, start_page, end_page)
+
+            if temp_section_path:
+                try:
+                    # Use Marker on the section PDF
+                    rendered_doc = converter(str(temp_section_path))
+
+                    from marker.output import text_from_rendered
+                    result = text_from_rendered(rendered_doc)
+
+                    # Handle potential tuple return
+                    if isinstance(result, tuple):
+                        section_text = result[0]
+                    else:
+                        section_text = result
+
+                    # Clean up temp file
+                    temp_section_path.unlink()
+
+                    return section_text
+
+                except Exception as e:
+                    logger.error(f"Marker section extraction failed: {e}")
+                    # Clean up temp file
+                    if temp_section_path.exists():
+                        temp_section_path.unlink()
+
+                    # Fallback to PyMuPDF for this section
+                    return self._extract_pymupdf_section(pdf_path, start_page, end_page)
+            else:
+                # Fallback if section PDF creation failed
+                return self._extract_pymupdf_section(pdf_path, start_page, end_page)
+
+        except Exception as e:
+            logger.error(f"Section extraction failed: {e}")
+            return self._extract_pymupdf_section(pdf_path, start_page, end_page)
+
+    def _create_section_pdf(self, pdf_path: Path, start_page: int, end_page: int) -> Optional[Path]:
+        """Create a temporary PDF with just the specified pages."""
+        try:
+            import fitz
+
+            # Create temp file path
+            temp_path = pdf_path.parent / f"temp_section_{start_page}_{end_page}_{pdf_path.stem}.pdf"
+
+            # Open original PDF
+            doc = fitz.open(pdf_path)
+
+            # Create new PDF with selected pages
+            new_doc = fitz.open()
+
+            for page_num in range(start_page, min(end_page + 1, doc.page_count)):
+                new_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+
+            # Save temp PDF
+            new_doc.save(str(temp_path))
+            new_doc.close()
+            doc.close()
+
+            logger.debug(f"Created temp section PDF: {temp_path}")
+            return temp_path
+
+        except Exception as e:
+            logger.error(f"Failed to create section PDF: {e}")
+            return None
+
+    def _extract_pymupdf_section(self, pdf_path: Path, start_page: int, end_page: int) -> str:
+        """Fallback: Extract section using PyMuPDF."""
+        try:
+            doc = fitz.open(pdf_path)
+            section_text = []
+
+            for page_num in range(start_page, min(end_page + 1, doc.page_count)):
+                page = doc[page_num]
+                page_text = page.get_text()
+
+                if page_text.strip():
+                    cleaned_text = self._clean_pdf_text(page_text)
+                    section_text.append(cleaned_text)
+
+            doc.close()
+            return "\n\n".join(section_text)
+
+        except Exception as e:
+            logger.error(f"PyMuPDF section extraction failed: {e}")
+            return f"[Section extraction failed: pages {start_page}-{end_page}]"
 
 
 # ===========================================

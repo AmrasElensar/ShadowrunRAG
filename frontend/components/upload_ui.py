@@ -57,11 +57,12 @@ class UploadUI:
         components["extraction_method_select"] = gr.Radio(
             choices=[
                 ("Hybrid Pipeline", "hybrid"),
-                ("Vision Analysis", "vision")
+                ("Vision Analysis", "vision"),
+                ("TOC-Guided Marker", "toc_guided")  # NEW OPTION
             ],
             value="hybrid",
             label="🔧 Extraction Strategy",
-            info="Hybrid: Fast Marker+LLM → fallbacks | Vision: Direct visual analysis for complex tables"
+            info="Hybrid: Fast Marker+LLM → fallbacks | Vision: Direct visual analysis | TOC-Guided: Structure + Quality"
         )
 
         # NEW: Add vision model selection (hidden by default)

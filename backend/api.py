@@ -198,7 +198,7 @@ async def upload_pdf_with_progress(
         raise HTTPException(400, f"Invalid document type. Must be one of: {valid_types}")
 
     # Validate extraction method
-    valid_methods = ["hybrid", "vision"]
+    valid_methods = ["hybrid", "vision", "toc_guided"]  # Add toc_guided
     if extraction_method not in valid_methods:
         raise HTTPException(400, f"Invalid extraction method. Must be one of: {valid_methods}")
 
