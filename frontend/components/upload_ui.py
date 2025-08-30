@@ -54,6 +54,25 @@ class UploadUI:
             info="Affects processing strategy and metadata"
         )
 
+        components["extraction_method_select"] = gr.Radio(
+            choices=[
+                ("Hybrid Pipeline", "hybrid"),
+                ("Vision Analysis", "vision")
+            ],
+            value="hybrid",
+            label="🔧 Extraction Strategy",
+            info="Hybrid: Fast Marker+LLM → fallbacks | Vision: Direct visual analysis for complex tables"
+        )
+
+        # NEW: Add vision model selection (hidden by default)
+        components["vision_model_select"] = gr.Dropdown(
+            choices=["qwen2.5vl:7b", "llama3.2-vision:11b", "granite3.2-vision"],
+            value="qwen2.5vl:7b",
+            label="👁️ Vision Model",
+            visible=False,
+            info="Vision model for complex table extraction"
+        )
+
         components["file_upload"] = gr.File(
             label="Upload PDFs",
             file_types=[".pdf"],
@@ -141,7 +160,7 @@ class UploadHandlers:
         self.rag_client = rag_client
         self.active_jobs = {}
 
-    def process_uploads(self, files: List, document_type: str) -> Tuple[str, gr.update]:
+    def process_uploads(self, files: List, document_type: str, extraction_method: str = "hybrid", vision_model: str = "qwen2.5vl:7b") -> Tuple[str, gr.update]:
         """Process multiple uploaded files."""
         try:
             if not files:
@@ -156,7 +175,11 @@ class UploadHandlers:
 
                 try:
                     # Upload the file
-                    result = self.rag_client.upload_pdf(file.name, document_type)
+                    result = self.rag_client.upload_pdf(file.name,
+                                                        document_type = document_type,
+                                                        extraction_method = extraction_method,
+                                                        vision_model = vision_model,
+                                                        )
 
                     if "error" in result:
                         status_messages.append(f"❌ **{file.name}**: {result['error']}")
@@ -310,10 +333,6 @@ class UploadHandlers:
             return status_msg
 
         except Exception as e:
-            error_msg = f"❌ **{operation.title()} Failed**\n\nError: {str(e)}"
-            return error_msg
-
-        except Exception as e:
             error_msg = UIErrorHandler.handle_exception(e, f"reindexing ({'full' if force_reindex else 'incremental'})")
             return error_msg
 
@@ -321,11 +340,21 @@ class UploadHandlers:
 def wire_upload_events(components: Dict, handlers: UploadHandlers):
     """Wire up upload event handlers."""
 
+    def toggle_vision_model_visibility(extraction_method):
+        """Show/hide vision model selector based on extraction method."""
+        return gr.update(visible=(extraction_method == "vision"))
+
     # Main upload functionality
     components["upload_btn"].click(
         fn=handlers.process_uploads,
-        inputs=[components["file_upload"], components["document_type_select"]],
-        outputs=[components["upload_status"], components["file_upload"]]
+        inputs=[components["file_upload"],
+                components["document_type_select"],
+                components["extraction_method_select"],
+                components["vision_model_select"]
+        ],
+        outputs=[components["upload_status"],
+                 components["file_upload"]
+        ]
     )
 
     # Progress checking
@@ -355,6 +384,12 @@ def wire_upload_events(components: Dict, handlers: UploadHandlers):
     components["timer"].tick(
         fn=handlers.poll_progress,
         outputs=[components["progress_status"], components["progress_display"], components["upload_status"]]
+    )
+
+    components["extraction_method_select"].change(
+        fn=toggle_vision_model_visibility,
+        inputs=[components["extraction_method_select"]],
+        outputs=[components["vision_model_select"]]
     )
 
     return components

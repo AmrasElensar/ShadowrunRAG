@@ -123,7 +123,9 @@ class EnhancedPDFProcessor:
             debug_mode: bool = True,
             progress_callback: Optional[Callable[[str, float, str], None]] = None,
             document_type: str = "rulebook",
-            use_gpu: bool = True
+            use_gpu: bool = True,
+            extraction_method: str = "vision",
+            vision_model: str = "qwen2.5vl:7b",
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -137,6 +139,9 @@ class EnhancedPDFProcessor:
         # NEW: Updated model cache for new Marker API
         self._marker_converter = None
         self._models_loading = False
+
+        self.extraction_method = extraction_method
+        self.vision_model = vision_model
 
         # Create debug directory
         if debug_mode:
@@ -174,18 +179,56 @@ class EnhancedPDFProcessor:
             logger.info("🚀 Loading Marker converter with NEW API + hybrid LLM mode...")
             start_time = time.time()
 
+            shadowrun_prompt = """
+                You are processing a Shadowrun tabletop RPG rulebook. Please:
+
+                1. **Tables**: Preserve all table structure exactly, especially:
+                   - Combat tables with modifiers and dice pools
+                   - Equipment stats tables
+                   - Character creation priority tables
+                   - Spell/program/matrix tables
+
+                2. **Multi-column layouts**: When text spans columns, merge it logically:
+                   - Keep rule descriptions together even when split across columns
+                   - Maintain the connection between rule headers and their explanations
+                   - Preserve numbered/bulleted lists that wrap columns
+
+                3. **Game-specific formatting**:
+                   - Keep dice pool notations like "12 dice" or "Force + Magic" intact
+                   - Preserve attribute abbreviations (STR, DEX, INT, etc.)
+                   - Maintain proper spacing in stat blocks
+                   - Keep sidebar content clearly separated from main text
+
+                4. **Structure preservation**:
+                   - Paragraphs are often split by tables or examples, merge them back together
+                   - Maintain proper heading hierarchy for chapters/sections
+                   - Keep example boxes and sidebars as distinct blocks
+                   - Preserve the relationship between rules and their examples
+
+                Focus on readability and preserving the game mechanics' clarity.
+                """
+
             # NEW API: Create PDF converter with hybrid mode
-            ollama_config = {
+            marker_config = {
                 'ollama_base_url': 'http://ollama:11434',
-                'ollama_model': 'qwen2.5:14b-instruct-q6_K'  # Best model for table reasoning
+                'ollama_model': 'llama3.1:8b',
+                #'ollama_args': 'num_ctx 16384',
+                'force_ocr': False,  # Force OCR for complex layouts
+                'use_llm': False,  # Enable LLM post-processing
+                #'block_correction_prompt': shadowrun_prompt,
+                #'disable_image_extraction': True,
+                'debug': True,
             }
+
+            if self.debug_mode:
+                marker_config['debug'] = True
 
             model_dict = create_model_dict()
 
             self._marker_converter = PdfConverter(
                 artifact_dict=model_dict,
                 llm_service='marker.services.ollama.OllamaService',  # Enable hybrid mode
-                config=ollama_config  # Ollama configuration
+                config=marker_config
             )
 
             load_time = time.time() - start_time
@@ -603,15 +646,91 @@ class EnhancedPDFProcessor:
             # Absolute last resort
             return f"# {pdf_path.stem}\n\nExtraction failed completely: {str(e)}"
 
-    def _extract_pdf_content(self, pdf_path: Path) -> str:
-        """Main extraction orchestrator: 4-tier hierarchy with fallbacks."""
+    def _extract_with_vision_model(self, pdf_path: Path) -> Optional[str]:
+        """Vision model extraction: Direct PDF page analysis for complex layouts."""
+        try:
+            import ollama
 
-        extraction_methods = [
-            ("Marker GPU (NEW API)", self._extract_with_marker, "🎯"),
-            ("PyMuPDF + TOC", self._extract_with_pymupdf_toc, "📚"),
-            ("Unstructured Emergency", self._extract_with_unstructured_fallback, "🚨"),
-            ("Basic Text", self._extract_emergency_text, "🆘")
-        ]
+            if self.progress_callback:
+                self.progress_callback("vision_init", 10, f"Starting vision extraction with {self.vision_model}")
+
+            logger.info(f"👁️ Processing {pdf_path.name} with vision model: {self.vision_model}")
+            start_time = time.time()
+
+            # Convert PDF pages to images
+            doc = fitz.open(pdf_path)
+            all_content = []
+            total_pages = len(doc)
+
+            for page_num in range(min(total_pages, 50)):  # Limit for performance
+                page = doc[page_num]
+
+                # Convert to high-quality image
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                img_data = pix.tobytes("png")
+
+                if self.progress_callback:
+                    progress = 20 + (page_num / min(total_pages, 50)) * 60
+                    self.progress_callback("vision_processing", progress,
+                                           f"Vision analyzing page {page_num + 1}/{total_pages}...")
+
+                # Vision model analysis
+                response = ollama.chat(
+                    model=self.vision_model,
+                    messages=[{
+                        'role': 'user',
+                        'content': """Extract all content from this PDF page as clean markdown. Focus on:
+                        - Complex multi-column tables (preserve exact structure)  
+                        - Text that spans table boundaries
+                        - Maintain proper heading hierarchy
+                        - Keep paragraph integrity even when split by tables or pages
+
+                        Format tables properly with markdown syntax.""",
+                        'images': [img_data]
+                    }],
+                    options={
+                        "temperature": 0.1,  # Low temperature for consistency
+                        "num_ctx": 4096
+                    }
+                )
+
+                page_content = response['message']['content']
+                all_content.append(f"<!-- Page {page_num + 1} -->\n{page_content}")
+
+            doc.close()
+            full_text = "\n\n---\n\n".join(all_content)
+            extraction_time = time.time() - start_time
+
+            if self.progress_callback:
+                self.progress_callback("vision_complete", 85,
+                                       f"Vision extraction complete ({extraction_time:.1f}s)")
+
+            logger.info(f"✅ Vision extraction: {len(full_text)} chars in {extraction_time:.1f}s")
+            return full_text
+
+        except Exception as e:
+            logger.error(f"❌ Vision extraction failed: {e}")
+            return None
+
+    def _extract_pdf_content(self, pdf_path: Path) -> str:
+        """Main extraction orchestrator: Choose between hybrid 4-tier or pure vision."""
+
+        if self.extraction_method == "vision":
+            # Pure vision approach
+            extraction_methods = [
+                ("Vision Model", self._extract_with_vision_model, "👁️"),
+                ("Marker GPU Fallback", self._extract_with_marker, "🎯"),  # Fallback
+                ("PyMuPDF + TOC", self._extract_with_pymupdf_toc, "📚"),
+                ("Basic Text", self._extract_emergency_text, "🆘")
+            ]
+        else:
+            # Your existing hybrid approach (default)
+            extraction_methods = [
+                ("Marker GPU (NEW API)", self._extract_with_marker, "🎯"),
+                ("PyMuPDF + TOC", self._extract_with_pymupdf_toc, "📚"),
+                ("Unstructured Emergency", self._extract_with_unstructured_fallback, "🚨"),
+                ("Basic Text", self._extract_emergency_text, "🆘")
+            ]
 
         extraction_start = time.time()
 
@@ -635,8 +754,8 @@ class EnhancedPDFProcessor:
                 if result and len(result.strip()) > 100:
                     logger.info(f"✅ {method_name} successful in {method_time:.1f}s")
 
-                    # Clear GPU cache after Marker
-                    if "Marker GPU" in method_name:
+                    # Clear GPU cache after GPU methods
+                    if any(gpu_method in method_name for gpu_method in ["Marker GPU", "Vision Model"]):
                         self._clear_gpu_cache()
 
                     return result
@@ -648,7 +767,7 @@ class EnhancedPDFProcessor:
                 logger.error(f"❌ {method_name} failed after {method_time:.1f}s: {e}")
                 continue
 
-        # Should never reach here due to emergency fallback, but just in case
+        # Should never reach here due to emergency fallback
         total_time = time.time() - extraction_start
         logger.error(f"💥 All extraction methods failed after {total_time:.1f}s")
         return f"# {pdf_path.stem}\n\nAll extraction methods failed"

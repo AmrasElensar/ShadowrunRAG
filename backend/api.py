@@ -130,22 +130,21 @@ def root():
         tracking_method="polling_enhanced"
     )
 
-def process_pdf_with_progress(pdf_path: str, job_id: str, document_type: str = "rulebook"):
-    """Process PDF with enhanced progress tracking and document type awareness."""
+
+def process_pdf_with_progress(pdf_path: str, job_id: str, document_type: str = "rulebook",
+                              extraction_method: str = "hybrid", vision_model: str = "qwen2.5vl:7b"):
+    """Process PDF with progress tracking and configurable extraction."""
+
+    def progress_callback(stage: str, progress: float, details: str):
+        progress_tracker.update_progress(job_id, stage, progress, details)
+
     try:
-        # Create processor with progress callback and document type
-        def progress_callback(stage, progress, details):
-            progress_tracker.update_progress(job_id, stage, progress, details, document_type)
-
-        progress_tracker.update_progress(
-            job_id, "starting", 5,
-            f"Initializing {document_type} processing...",
-            document_type
-        )
-
+        # Create processor with specified extraction method
         processor = PDFProcessor(
-            progress_callback=progress_callback,
-            document_type=document_type
+            document_type=document_type,
+            extraction_method=extraction_method,
+            vision_model=vision_model,
+            progress_callback=progress_callback
         )
 
         # Process the PDF
@@ -180,12 +179,16 @@ def process_pdf_with_progress(pdf_path: str, job_id: str, document_type: str = "
         logger.error(traceback.format_exc())
         raise
 
+
 @app.post("/upload", response_model=UploadResponse)
 async def upload_pdf_with_progress(
-    file: UploadFile = File(...),
-    document_type: str = Form(default="rulebook", description="Document type: rulebook, character_sheet, universe_info, adventure")
+        file: UploadFile = File(...),
+        document_type: str = Form(default="rulebook",
+                                  description="Document type: rulebook, character_sheet, universe_info, adventure"),
+        extraction_method: str = Form(default="vision", description="Extraction method: hybrid, vision"),  # NEW
+        vision_model: str = Form(default="qwen2.5vl:7b", description="Vision model for vision extraction")  # NEW
 ):
-    """Upload and process a PDF with document type specification."""
+    """Upload and process a PDF with document type and extraction method specification."""
     if not file.filename.endswith('.pdf'):
         raise HTTPException(400, "Only PDF files are allowed")
 
@@ -194,8 +197,13 @@ async def upload_pdf_with_progress(
     if document_type not in valid_types:
         raise HTTPException(400, f"Invalid document type. Must be one of: {valid_types}")
 
+    # Validate extraction method
+    valid_methods = ["hybrid", "vision"]
+    if extraction_method not in valid_methods:
+        raise HTTPException(400, f"Invalid extraction method. Must be one of: {valid_methods}")
+
     # Generate unique job ID
-    job_id = f"{document_type}_{file.filename}_{int(time.time() * 1000)}"
+    job_id = f"{document_type}_{extraction_method}_{file.filename}_{int(time.time() * 1000)}"
 
     try:
         # Save file quickly
@@ -205,10 +213,22 @@ async def upload_pdf_with_progress(
         content = await file.read()
         save_path.write_bytes(content)
 
+        # Save extraction metadata alongside the PDF
+        metadata = {
+            "document_type": document_type,
+            "extraction_method": extraction_method,
+            "vision_model": vision_model,
+            "uploaded_at": time.time()
+        }
+
+        metadata_file = save_path.with_suffix('.meta.json')
+        metadata_file.write_text(json.dumps(metadata))
+
         # Start processing in background thread
         def start_processing():
             try:
-                process_pdf_with_progress(str(save_path), job_id, document_type)
+                process_pdf_with_progress(str(save_path), job_id, document_type, extraction_method,
+                                          vision_model)  # Pass new params
             except Exception as e:
                 logger.error(f"Background processing failed: {e}")
 
@@ -219,7 +239,7 @@ async def upload_pdf_with_progress(
             job_id=job_id,
             filename=file.filename,
             status="processing",
-            message=f"PDF uploaded as {document_type}. Processing started with enhanced tracking.",
+            message=f"PDF uploaded as {document_type} using {extraction_method} extraction. Processing started.",
             poll_url=f"/job/{job_id}"
         )
 

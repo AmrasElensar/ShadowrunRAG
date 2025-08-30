@@ -19,12 +19,15 @@ class RAGClient:
         self.api_url = api_url
         self.active_jobs = {}
 
-    def upload_pdf(self, file_path: str, document_type: str = "rulebook") -> Dict:
+    def upload_pdf(self, file_path, document_type="rulebook", extraction_method="hybrid", vision_model="qwen2.5vl:7b") -> Dict:
         """Upload a PDF with document type specification."""
         try:
             with open(file_path, 'rb') as f:
                 files = {'file': (Path(file_path).name, f, 'application/pdf')}
-                data = {'document_type': document_type}
+                data = {'document_type': document_type,
+                        'extraction_method': extraction_method,
+                        'vision_model': vision_model
+                        }
                 response = requests.post(
                     f"{self.api_url}/upload",
                     files=files,
