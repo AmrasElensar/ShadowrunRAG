@@ -151,12 +151,12 @@ def process_pdf_with_progress(pdf_path: str, job_id: str, document_type: str = "
         result = processor.process_pdf(pdf_path, force_reparse=True)
 
         # Index the results
-        progress_tracker.update_progress(
-            job_id, "indexing", 95,
-            "Adding to search index with enhanced metadata...",
-            document_type
-        )
-        indexer.index_directory("data/processed_markdown")
+        #progress_tracker.update_progress(
+        #    job_id, "indexing", 95,
+        #    "Adding to search index with enhanced metadata...",
+        #    document_type
+        #)
+        #indexer.index_directory("data/processed_markdown")
 
         progress_tracker.update_progress(
             job_id, "complete", 100,

@@ -18,6 +18,8 @@ import time
 import fitz  # PyMuPDF
 from pathlib import Path
 from typing import Dict, Optional, Callable, List, Tuple
+from tools.llm_text_preprocessor import create_preprocessor
+from tools.regex_text_cleaner import create_regex_cleaner
 import traceback
 import re
 
@@ -981,8 +983,17 @@ class EnhancedPDFProcessor:
             logger.info(f"🎉 Successfully processed {pdf_name} in {total_time:.1f}s: 1 file created for indexer")
 
             if self.progress_callback:
+                self.progress_callback("complete", 95,
+                                       f"Enhanced processing complete! Created 1 file in {total_time:.1f}s - File will now be preprocessed for cleanup")
+
+            regex_cleaner = create_regex_cleaner()
+            file_path = Path(next(iter(saved_files.keys())))  # This gets the first key
+            file_path_cleaned = file_path.with_stem(file_path.stem + "_cleaned")
+            regex_cleaner.clean_file(file_path, file_path_cleaned)
+
+            if self.progress_callback:
                 self.progress_callback("complete", 100,
-                                       f"Enhanced processing complete! Created 1 file in {total_time:.1f}s - indexer will handle chunking")
+                                       f"Preprocessing complete!")
 
             return saved_files
 
