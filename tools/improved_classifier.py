@@ -1,354 +1,250 @@
-#!/usr/bin/env python3
 """
-Cleaned semantic chunker that uses LLM-based classification.
-Replaces tools/improved_classifier.py with only the chunking logic.
+Clean semantic chunker that uses existing regex cleaner and unified classification.
+Replaces tools/improved_classifier.py completely.
 """
 
 import re
 import logging
+import hashlib
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional, Callable
 
 logger = logging.getLogger(__name__)
 
 
-class ImprovedSemanticChunker:
-    """Semantic-aware chunking that uses LLM classification."""
+class CleanSemanticChunker:
+    """Semantic chunker using existing regex cleaner and unified LLM classification."""
 
-    def __init__(self, chunk_size: int = 800, overlap: int = 100):
-        self.chunk_size = chunk_size  # Reduced from 1024 for better retrieval
+    def __init__(self, chunk_size: int = 800, overlap: int = 150):
+        self.chunk_size = chunk_size
         self.overlap = overlap
-        # Use LLM classifier instead of pattern-based
+
+        # Import existing components
         from tools.llm_classifier import create_llm_classifier
-        self.classifier = create_llm_classifier(model_name="phi4-mini")
+        from tools.regex_text_cleaner import create_regex_cleaner
 
-    def chunk_document(self, text: str, source: str, count_tokens_fn) -> List[Dict]:
-        """Create semantically aware chunks with LLM-based metadata."""
+        self.classifier = create_llm_classifier(model_name="qwen2.5:14b-instruct-q6_K")
+        self.regex_cleaner = create_regex_cleaner()
 
-        # Clean and normalize text
-        text = self._clean_text(text)
+        logger.info(f"Clean semantic chunker initialized: {chunk_size} tokens, {overlap} overlap")
 
-        # Split by main headers first (# headers)
-        main_sections = self._split_by_headers(text)
+    def chunk_document(self, text: str, source: str, count_tokens_fn: Callable) -> List[Dict]:
+        """Create semantically aware chunks using existing regex cleaner."""
 
-        if not main_sections:
-            # Fallback to paragraph-based splitting
-            logger.warning(f"No headers found in {source}, using paragraph splitting")
-            return self._chunk_by_paragraphs(text, source, count_tokens_fn)
+        # Use existing regex cleaner
+        cleaned_text = self.regex_cleaner.clean_text(text)
+
+        if not cleaned_text.strip():
+            logger.warning(f"No content after cleaning: {source}")
+            return []
+
+        # Split by headers to preserve document structure
+        sections = self._split_by_headers(cleaned_text)
+
+        if not sections:
+            # No headers - treat as single section
+            sections = [{"title": "Content", "content": cleaned_text, "level": 1}]
 
         all_chunks = []
 
-        for section_idx, section in enumerate(main_sections):
-            section_chunks = self._chunk_section_semantically(
+        for section_idx, section in enumerate(sections):
+            section_chunks = self._chunk_section_with_overlap(
                 section, source, count_tokens_fn, section_idx
             )
             all_chunks.extend(section_chunks)
 
-        # Add global sequential links
-        self._add_global_links(all_chunks)
+        # Add sequential links for context preservation
+        self._add_sequential_links(all_chunks)
 
-        logger.info(f"Created {len(all_chunks)} semantic chunks from {len(main_sections)} sections")
+        logger.info(f"Created {len(all_chunks)} chunks from {len(sections)} sections in {source}")
         return all_chunks
 
-    def _clean_text(self, text: str) -> str:
-        """Clean text while preserving structure."""
-
-        # Remove excessive whitespace but preserve paragraph breaks
-        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
-        text = re.sub(r'[ \t]+', ' ', text)
-
-        # Clean up table formatting
-        text = re.sub(r'\|\s*\n\s*\|', '|\n|', text)
-
-        return text.strip()
-
     def _split_by_headers(self, text: str) -> List[Dict]:
-        """Split by headers while preserving semantic units."""
+        """Split text by markdown headers while preserving semantic structure."""
 
+        # Look for markdown headers (# ## ###)
+        header_pattern = r'^(#{1,3})\s+(.+?)$'
         lines = text.split('\n')
+
         sections = []
-        current_section = {"title": "Introduction", "content": [], "level": 1}
+        current_section = {"title": "", "content": "", "level": 1}
 
         for line in lines:
-            # Check for headers (# or ##, but not ###+ to avoid over-splitting)
-            header_match = re.match(r'^(#{1,2})\s+(.+)$', line.strip())
+            match = re.match(header_pattern, line.strip())
 
-            if header_match:
-                # Save previous section
-                if current_section["content"]:
-                    current_section["content"] = '\n'.join(current_section["content"]).strip()
-                    if len(current_section["content"]) > 50:  # Skip tiny sections
-                        sections.append(current_section)
+            if match:
+                # Save previous section if it has content
+                if current_section["content"].strip():
+                    sections.append(current_section)
 
                 # Start new section
-                level = len(header_match.group(1))
-                title = header_match.group(2).strip()
+                level = len(match.group(1))
+                title = match.group(2).strip()
 
                 current_section = {
                     "title": title,
-                    "content": [line],  # Include header in content
+                    "content": "",
                     "level": level
                 }
             else:
-                current_section["content"].append(line)
+                # Add line to current section
+                current_section["content"] += line + "\n"
 
         # Add final section
-        if current_section["content"]:
-            current_section["content"] = '\n'.join(current_section["content"]).strip()
-            if len(current_section["content"]) > 50:
-                sections.append(current_section)
+        if current_section["content"].strip():
+            sections.append(current_section)
+
+        if sections:
+            logger.info(f"Split into {len(sections)} sections by headers")
 
         return sections
 
-    def _chunk_section_semantically(self, section: Dict, source: str,
-                                    count_tokens_fn, section_idx: int) -> List[Dict]:
-        """Chunk a section while respecting semantic boundaries."""
+    def _chunk_section_with_overlap(self, section: Dict, source: str,
+                                    count_tokens_fn: Callable, section_idx: int) -> List[Dict]:
+        """Chunk a section with consistent overlap and unified classification."""
 
-        title = section["title"]
         content = section["content"]
+        title = section["title"]
 
-        # Get base metadata for this section using LLM classifier
-        base_metadata = self.classifier.classify_content(content, source)
-        base_metadata.update({
-            "section_title": title,
-            "section_index": section_idx,
-            "section_id": self._generate_section_id(title)
-        })
+        # In _chunk_section_with_overlap, add logging:
+        logger.info(f"Section '{title}' will create approximately {len(content) // self.chunk_size} chunks")
 
-        token_count = count_tokens_fn(content)
-
-        # If section fits in one chunk, return it as-is
-        if token_count <= self.chunk_size:
-            chunk_metadata = base_metadata.copy()
-            chunk_metadata.update({
-                "chunk_index": 0,
-                "total_chunks_in_section": 1,
-                "section_complete": True,
-                "token_count": token_count
-            })
-
-            return [{
-                "text": content,
-                "source": source,
-                "metadata": chunk_metadata
-            }]
-
-        # Split large section intelligently
-        return self._split_large_section(content, base_metadata, source, count_tokens_fn)
-
-    def _split_large_section(self, content: str, base_metadata: Dict,
-                             source: str, count_tokens_fn) -> List[Dict]:
-        """Split large sections at semantic boundaries."""
+        if not content.strip():
+            return []
 
         chunks = []
+        current_pos = 0
+        chunk_idx = 0
 
-        # Try to split at natural boundaries (paragraphs, tables, lists)
-        segments = self._find_semantic_segments(content)
+        while current_pos < len(content):
+            # Extract chunk with overlap consideration
+            chunk_end = min(current_pos + self.chunk_size, len(content))
 
-        current_chunk = []
-        current_tokens = 0
+            # Try to end at sentence boundary
+            chunk_text = content[current_pos:chunk_end]
 
-        for segment in segments:
-            segment_tokens = count_tokens_fn(segment)
+            # Look for good break point (sentence end)
+            if chunk_end < len(content):
+                # Find last sentence end in chunk
+                sentence_ends = [m.end() for m in re.finditer(r'[.!?]\s+', chunk_text)]
+                if sentence_ends and len(chunk_text) - sentence_ends[-1] > 50:
+                    # Use sentence boundary if it's not too close to the end
+                    chunk_end = current_pos + sentence_ends[-1]
+                    chunk_text = content[current_pos:chunk_end]
 
-            # If adding this segment would exceed chunk size, finalize current chunk
-            if current_tokens + segment_tokens > self.chunk_size and current_chunk:
-                chunk_text = '\n'.join(current_chunk)
+            # Skip very short chunks (unless it's the last one)
+            if len(chunk_text.strip()) < 100 and chunk_end < len(content):
+                current_pos += 200  # Skip forward
+                continue
 
-                # Add overlap from next segment if possible
-                if self.overlap > 0:
-                    overlap_text = segment[:self.overlap] if len(segment) > self.overlap else segment
-                    chunk_text += f"\n{overlap_text}"
+            # Create chunk with metadata
+            chunk_id = f"{source}_section_{section_idx}_chunk_{chunk_idx}"
 
-                chunk_metadata = base_metadata.copy()
-                chunk_metadata.update({
-                    "chunk_index": len(chunks),
-                    "token_count": count_tokens_fn(chunk_text),
-                    "section_complete": False
-                })
+            # Classify chunk using unified classifier
+            classification = self.classifier.classify_content(chunk_text, source)
+            logger.info(f"Classification result: {classification}")
 
-                chunks.append({
-                    "text": chunk_text,
-                    "source": source,
-                    "metadata": chunk_metadata
-                })
 
-                # Start new chunk with overlap
-                if self.overlap > 0 and current_chunk:
-                    overlap_segments = current_chunk[-1:]  # Keep last segment as overlap
-                    current_chunk = overlap_segments + [segment]
-                    current_tokens = count_tokens_fn('\n'.join(current_chunk))
-                else:
-                    current_chunk = [segment]
-                    current_tokens = segment_tokens
-            else:
-                current_chunk.append(segment)
-                current_tokens += segment_tokens
-
-        # Add final chunk
-        if current_chunk:
-            chunk_text = '\n'.join(current_chunk)
-            chunk_metadata = base_metadata.copy()
-            chunk_metadata.update({
-                "chunk_index": len(chunks),
-                "token_count": count_tokens_fn(chunk_text),
-                "section_complete": True
-            })
-
-            chunks.append({
-                "text": chunk_text,
+            # Build chunk metadata
+            chunk_data = {
+                "id": chunk_id,
+                "text": chunk_text.strip(),
                 "source": source,
-                "metadata": chunk_metadata
-            })
+                # Classification metadata from unified classifier
+                "metadata": {
+                    "sections": [classification.get("primary_section", "Unknown")],  # In metadata
+                    "next_chunk_global": None,  # In metadata
+                    "prev_chunk_global": None,  # In metadata
+                    "section_title": title,
+                    "chunk_index": chunk_idx,
+                    "char_start": current_pos,
+                    "char_end": chunk_end,
+                    "token_count": count_tokens_fn(chunk_text) if count_tokens_fn else len(chunk_text.split()),
+                    "section_index": section_idx,
+                    "primary_section": classification.get("primary_section", "Unknown"),
+                    "content_type": classification.get("content_type", "unknown"),
+                    "contains_rules": classification.get("contains_rules", False),
+                    "is_rule_definition": classification.get("is_rule_definition", False),
+                    "contains_dice_pools": classification.get("contains_dice_pools", False),
+                    "contains_examples": classification.get("contains_examples", False),
+                    "confidence": classification.get("confidence", 0.5),
+                    "mechanical_keywords": classification.get("mechanical_keywords", []),
+                    "specific_topics": classification.get("specific_topics", []),
+                    "classification_method": classification.get("classification_method", "unknown"),
+                    # Document metadata
+                    "document_type": classification.get("document_type", "rulebook"),
+                    "edition": classification.get("edition", "SR5")
+                }
+            }
 
-        # Update total chunks count for all chunks in this section
-        for chunk in chunks:
-            chunk["metadata"]["total_chunks_in_section"] = len(chunks)
+            chunks.append(chunk_data)
 
+            # Move forward with overlap
+            if chunk_end >= len(content):
+                break
+
+            old_pos = current_pos
+            overlap_start = max(0, chunk_end - self.overlap)
+            current_pos = overlap_start
+            logger.info(f"Position update: {old_pos} -> {current_pos}")
+
+            # Safety check to prevent infinite loops
+            if current_pos <= old_pos and chunk_end < len(content):
+                logger.error(f"Chunker stuck! Position not advancing: {old_pos} -> {current_pos}")
+                current_pos = old_pos + 200  # Force advancement
+
+            chunk_idx += 1
+
+        logger.debug(f"Section '{title}' created {len(chunks)} chunks")
         return chunks
 
-    def _find_semantic_segments(self, content: str) -> List[str]:
-        """Split content into semantic segments (paragraphs, tables, lists)."""
-
-        segments = []
-        current_segment = []
-
-        lines = content.split('\n')
-        in_table = False
-
-        for line in lines:
-            # Detect table boundaries
-            if '|' in line and line.count('|') > 1:
-                if not in_table:
-                    # Starting a table - finalize current segment
-                    if current_segment:
-                        segments.append('\n'.join(current_segment).strip())
-                        current_segment = []
-                    in_table = True
-                current_segment.append(line)
-
-            elif in_table and line.strip() == '':
-                # End of table
-                if current_segment:
-                    segments.append('\n'.join(current_segment).strip())
-                    current_segment = []
-                in_table = False
-
-            elif line.strip() == '' and not in_table:
-                # Paragraph break
-                if current_segment:
-                    segments.append('\n'.join(current_segment).strip())
-                    current_segment = []
-
-            else:
-                current_segment.append(line)
-
-        # Add final segment
-        if current_segment:
-            segments.append('\n'.join(current_segment).strip())
-
-        return [seg for seg in segments if len(seg.strip()) > 10]
-
-    def _chunk_by_paragraphs(self, text: str, source: str, count_tokens_fn) -> List[Dict]:
-        """Fallback paragraph-based chunking."""
-
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-        base_metadata = self.classifier.classify_content(text, source)
-
-        chunks = []
-        current_chunk = []
-        current_tokens = 0
-
-        for para in paragraphs:
-            para_tokens = count_tokens_fn(para)
-
-            if current_tokens + para_tokens > self.chunk_size and current_chunk:
-                # Finalize current chunk
-                chunk_text = '\n\n'.join(current_chunk)
-                chunk_metadata = base_metadata.copy()
-                chunk_metadata.update({
-                    "chunk_index": len(chunks),
-                    "token_count": current_tokens,
-                    "section_complete": False
-                })
-
-                chunks.append({
-                    "text": chunk_text,
-                    "source": source,
-                    "metadata": chunk_metadata
-                })
-
-                current_chunk = [para]
-                current_tokens = para_tokens
-            else:
-                current_chunk.append(para)
-                current_tokens += para_tokens
-
-        # Add final chunk
-        if current_chunk:
-            chunk_text = '\n\n'.join(current_chunk)
-            chunk_metadata = base_metadata.copy()
-            chunk_metadata.update({
-                "chunk_index": len(chunks),
-                "token_count": current_tokens,
-                "section_complete": True
-            })
-
-            chunks.append({
-                "text": chunk_text,
-                "source": source,
-                "metadata": chunk_metadata
-            })
-
-        return chunks
-
-    def _generate_section_id(self, title: str) -> str:
-        """Generate clean section ID."""
-        clean_title = re.sub(r'[^a-zA-Z0-9\s]', '', title)
-        clean_title = re.sub(r'\s+', '_', clean_title.strip())
-        return clean_title.lower()[:50]
-
-    def _add_global_links(self, chunks: List[Dict]) -> None:
-        """Add navigation links between chunks."""
+    def _add_sequential_links(self, chunks: List[Dict]) -> None:
+        """Add sequential linking metadata for better context retrieval."""
 
         for i, chunk in enumerate(chunks):
-            metadata = chunk['metadata']
-
-            # Global navigation
             if i > 0:
-                metadata['prev_chunk_global'] = f"chunk_{i - 1:03d}"
+                chunk["metadata"]["prev_chunk_global"] = chunks[i - 1]["id"]
             if i < len(chunks) - 1:
-                metadata['next_chunk_global'] = f"chunk_{i + 1:03d}"
+                chunk["metadata"]["next_chunk_global"] = chunks[i + 1]["id"]
 
-            # Section-specific navigation
-            section_id = metadata.get('section_id')
-            if section_id:
-                section_chunks = [
-                    (j, c) for j, c in enumerate(chunks)
-                    if c['metadata'].get('section_id') == section_id
-                ]
+            # Add section-level links
+            same_section_chunks = [
+                c["id"] for c in chunks
+                if c.get("metadata", {}).get("section_index") == chunk.get("metadata", {}).get("section_index")
+                   and c["id"] != chunk["id"]
+            ]
+            chunk["metadata"]["section_chunk_ids"] = same_section_chunks[:5]
 
-                # Find position within section
-                section_position = next(
-                    (pos for pos, (chunk_idx, _) in enumerate(section_chunks) if chunk_idx == i),
-                    None
-                )
+    def get_chunk_statistics(self, chunks: List[Dict]) -> Dict:
+        """Generate statistics about chunking quality for monitoring."""
 
-                if section_position is not None:
-                    if section_position > 0:
-                        prev_idx = section_chunks[section_position - 1][0]
-                        metadata['prev_chunk_section'] = f"chunk_{prev_idx:03d}"
+        if not chunks:
+            return {"total_chunks": 0}
 
-                    if section_position < len(section_chunks) - 1:
-                        next_idx = section_chunks[section_position + 1][0]
-                        metadata['next_chunk_section'] = f"chunk_{next_idx:03d}"
+        token_counts = [c["token_count"] for c in chunks]
+        classifications = [c["primary_section"] for c in chunks]
+        content_types = [c["content_type"] for c in chunks]
 
-            # Unique chunk ID
-            metadata['chunk_id'] = f"chunk_{i:03d}"
+        from collections import Counter
+
+        stats = {
+            "total_chunks": len(chunks),
+            "avg_token_count": sum(token_counts) / len(token_counts),
+            "min_tokens": min(token_counts),
+            "max_tokens": max(token_counts),
+            "section_distribution": dict(Counter(classifications)),
+            "content_type_distribution": dict(Counter(content_types)),
+            "rule_chunks": sum(1 for c in chunks if c["contains_rules"]),
+            "example_chunks": sum(1 for c in chunks if c["contains_examples"]),
+            "dice_pool_chunks": sum(1 for c in chunks if c["contains_dice_pools"]),
+            "matrix_chunks": sum(1 for c in chunks if c["primary_section"] == "Matrix"),
+            "combat_chunks": sum(1 for c in chunks if c["primary_section"] == "Combat")
+        }
+
+        return stats
 
 
-# Integration function for indexer.py
-def replace_chunk_text_semantic(text: str, source: str, count_tokens_fn) -> List[Dict]:
-    """Replacement for _chunk_text_semantic in indexer.py"""
-    chunker = ImprovedSemanticChunker(chunk_size=800, overlap=100)
-    return chunker.chunk_document(text, source, count_tokens_fn)
+# Factory function for indexer.py integration
+def create_semantic_chunker(chunk_size: int = 800, overlap: int = 150) -> CleanSemanticChunker:
+    """Factory function for indexer integration."""
+    return CleanSemanticChunker(chunk_size=chunk_size, overlap=overlap)

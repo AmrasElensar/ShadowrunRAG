@@ -3,11 +3,9 @@ Character CRUD operations and business logic for Shadowrun RAG character system.
 Handles all character data operations, query context generation, and export functionality.
 """
 
-import sqlite3
 from typing import Dict, List, Optional, Any, Tuple
 import json
 import logging
-from pathlib import Path
 from datetime import datetime
 
 logger = logging.getLogger(__name__)

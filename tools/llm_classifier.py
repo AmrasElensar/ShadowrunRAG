@@ -1,6 +1,6 @@
 """
-LLM-based chunk classifier for Shadowrun content using local small models.
-Replaces pattern-based classification with semantic understanding.
+Unified LLM-based classifier using qwen2.5:14b for consistent Shadowrun content classification.
+Replaces tools/llm_classifier.py
 """
 
 import json
@@ -14,10 +14,10 @@ import ollama
 logger = logging.getLogger(__name__)
 
 
-class LLMShadowrunClassifier:
-    """LLM-powered classifier that understands Shadowrun content semantically."""
+class UnifiedShadowrunClassifier:
+    """Unified classifier using qwen2.5:14b for all classification tasks."""
 
-    def __init__(self, model_name: str = "phi4-mini", timeout: int = 30):
+    def __init__(self, model_name: str = "qwen2.5:14b-instruct-q6_K", timeout: int = 45):
         self.model_name = model_name
         self.timeout = timeout
         self.fallback_classifier = PatternBasedFallback()
@@ -25,63 +25,75 @@ class LLMShadowrunClassifier:
         # Test if model is available
         self._ensure_model_available()
 
-        # Classification prompt template
-        self.classification_prompt = """Analyze this Shadowrun tabletop RPG content and classify it accurately.
+        # Enhanced classification prompt for qwen2.5:14b
+        self.classification_prompt = """You are an expert Shadowrun tabletop RPG content analyzer. Classify this content with high precision.
 
 Content to classify:
 {text}
 
-Instructions:
-1. Select ALL applicable categories (can be multiple)
-2. Determine the content type
-3. Assess if it contains actual game rules
+CLASSIFICATION REQUIREMENTS:
+1. PRIMARY SECTION: Choose the single most relevant category
+2. CONTENT TYPE: Determine the exact type of content
+3. RULE ASSESSMENT: Does this contain actual game mechanics?
 
-Categories (select all that apply):
-- Combat: Attack rolls, damage, initiative, armor, weapon mechanics, condition monitors
-- Magic: Spells, spirits, astral projection, magical traditions, drain, force ratings  
-- Matrix: Hacking, cybercombat, programs, IC, hosts, data processing, cyberdecks
-- Skills: Skill tests, dice pools, thresholds, specializations, defaulting rules
-- Gear: Equipment stats, weapons, armor, electronics, availability, costs
-- Character_Creation: Priority system, attribute assignment, skill points, metatypes
-- Social: Reputation, contacts, etiquette, negotiation, lifestyle
+PRIMARY SECTIONS (choose ONE most relevant):
+- Matrix: Hacking, cybercombat, IC (including Black IC), programs, hosts, data processing, cyberdecks, Matrix damage, resistance tests
+- Combat: Physical combat, damage, armor, weapons, initiative, condition monitors, wound modifiers
+- Magic: Spells, spirits, astral projection, magical traditions, drain, force ratings, summoning
+- Skills: Skill tests, dice pools, thresholds, specializations, defaulting, extended tests
+- Gear: Equipment, weapons, armor, electronics, availability, costs, modifications
+- Character_Creation: Priority system, attributes, skill points, metatypes, qualities, karma
 - Riggers: Drones, vehicles, jumped-in control, vehicle combat, pilot programs
-- Game_Mechanics: Core rules, test procedures, karma, edge, limits, game flow
-- Setting: Background, corporations, locations, history, world information
+- Game_Mechanics: Core rules, Edge, limits, initiative, general test procedures
+- Social: Contacts, reputation, etiquette, negotiation, lifestyle, social tests
+- Setting: Background, corporations, locations, history, world lore
 
-Content Types:
-- explicit_rule: Contains specific game mechanics, dice formulas, procedures
-- example: Character stories, scenarios, sample situations  
-- table: Equipment lists, reference tables, stat blocks
+CONTENT TYPES:
+- explicit_rule: Contains specific game mechanics, dice pools, test procedures, formulas
+- example: Character stories, scenarios, sample gameplay situations
+- table: Equipment lists, reference tables, stat blocks, costs
 - narrative: Background text, flavor text, setting descriptions
-- index: Page references, table of contents, cross-references
+- reference: Page numbers, cross-references, table of contents
 
-CRITICAL: Respond ONLY with valid JSON in this exact format:
+CRITICAL MATRIX CONTENT DETECTION:
+- If content mentions IC, Black IC, Matrix damage, resistance tests, or hacking mechanics → Matrix section
+- If content contains dice pool formulas for Matrix actions → explicit_rule type
+- Pay special attention to IC attack mechanics and Matrix damage resistance
+
+Respond ONLY with valid JSON:
 {{
-  "categories": ["category1", "category2"],
-  "content_type": "explicit_rule", 
+  "primary_section": "Matrix",
+  "content_type": "explicit_rule",
   "contains_rules": true,
-  "confidence": 0.85,
-  "reasoning": "Brief explanation of classification"
+  "contains_dice_pools": true,
+  "contains_examples": false,
+  "confidence": 0.95,
+  "reasoning": "Contains IC attack mechanics with dice pool formulas",
+  "mechanical_keywords": ["dice pool", "test", "resistance", "damage"],
+  "specific_topics": ["Black IC", "Matrix damage", "resistance test"]
 }}
 
-CRITICAL: Your response must be ONLY the JSON object. No explanations, no reasoning steps, no other text."""
+RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT."""
 
     def _ensure_model_available(self):
-        """Check if the specified model is available, suggest alternatives if not."""
+        """Check if qwen2.5:14b is available."""
         try:
-            # Test if model responds
             test_response = ollama.chat(
                 model=self.model_name,
-                messages=[{"role": "user", "content": "Test"}],
-                options={"num_predict": 5}
+                messages=[{"role": "user", "content": "Test classification"}],
+                options={"num_predict": 10, "temperature": 0.1}
             )
-            logger.info(f"LLM classifier using model: {self.model_name}")
+            logger.info(f"Unified classifier using model: {self.model_name}")
 
         except Exception as e:
-            logger.warning(f"Model {self.model_name} not available: {e}")
+            logger.error(f"Model {self.model_name} not available: {e}")
 
-            # Try common alternatives
-            alternatives = ["qwen3:1.7b", "llama3.2:1b", "gemma3:1b"]
+            # Try qwen2.5 variants
+            alternatives = [
+                "qwen2.5:14b-instruct",
+                "qwen2.5:7b-instruct",
+                "qwen2.5:3b-instruct"
+            ]
 
             for alt_model in alternatives:
                 try:
@@ -96,352 +108,266 @@ CRITICAL: Your response must be ONLY the JSON object. No explanations, no reason
                 except:
                     continue
 
-            logger.error("No suitable LLM model found. Using pattern-based fallback only.")
+            logger.error("No suitable qwen2.5 model found. Using pattern fallback only.")
             self.model_name = None
 
     def classify_content(self, text: str, source: str) -> Dict[str, Any]:
-        """Main classification method using LLM + fallback."""
+        """Main classification method with enhanced Matrix detection."""
 
-        # Check for index content first (quick filter)
+        # Quick filter for obvious index/reference content
         if self._is_index_content(text):
             return self._create_index_metadata(source)
 
-        # Try LLM classification first
+        # Try LLM classification with qwen2.5:14b
         if self.model_name:
             llm_result = self._classify_with_llm(text)
-            if llm_result and llm_result.get("confidence", 0) > 0.4:
-                # LLM classification succeeded
+            if llm_result and llm_result.get("confidence", 0) > 0.5:
                 return self._create_metadata_from_llm_result(llm_result, text, source)
 
-        # Fallback to pattern-based classification
-        logger.warning(f"Using fallback classification for chunk from {source}")
-        return self.fallback_classifier.classify_content(text, source)
+        # Enhanced pattern fallback with better Matrix detection
+        logger.warning(f"Using enhanced pattern fallback for {source}")
+        return self._enhanced_pattern_classification(text, source)
 
     def _classify_with_llm(self, text: str, max_retries: int = 2) -> Optional[Dict]:
-        """Classify content using LLM with retry logic."""
+        """Classify using qwen2.5:14b with retry logic."""
 
-        # Truncate text for efficiency (keep first and last parts for context)
-        text_sample = self._prepare_text_for_llm(text)
+        # Truncate very long text to first 1500 chars for classification
+        sample_text = text[:1500] if len(text) > 1500 else text
 
         for attempt in range(max_retries + 1):
             try:
-                # Make LLM request
+                prompt = self.classification_prompt.format(text=sample_text)
+
                 response = ollama.chat(
                     model=self.model_name,
-                    messages=[{
-                        "role": "user",
-                        "content": self.classification_prompt.format(text=text_sample)
-                    }],
+                    messages=[{"role": "user", "content": prompt}],
                     options={
-                        "temperature": 0.2,  # Low temperature for consistent classification
-                        "num_predict": 1000,  # Limit response length
-                        "top_p": 0.9
+                        "temperature": 0.1,
+                        "top_p": 0.9,
+                        "num_predict": 300,
+                        "stop": ["\n\n", "```"]
                     }
                 )
 
-                # Parse JSON response
-                response_text = response['message']['content'].strip()
+                response_text = response["message"]["content"].strip()
 
-                # Clean up response (remove any markdown formatting)
-                response_text = self._clean_json_response(response_text)
+                logger.info(f"LLM raw response attempt {attempt + 1}: {response_text[:200]}...")
+                logger.info(f"Response length: {len(response_text)} chars")
+
+                # Clean response - remove any markdown formatting
+                response_text = re.sub(r'```json\s*', '', response_text)
+                response_text = re.sub(r'```\s*$', '', response_text)
+
+                logger.info(f"Cleaned response: {response_text[:200]}...")
 
                 result = json.loads(response_text)
 
-                # Validate result format
-                if self._validate_llm_result(result):
+                # Validate required fields
+                required_fields = ["primary_section", "content_type", "contains_rules", "confidence"]
+                if all(field in result for field in required_fields):
                     return result
                 else:
-                    logger.warning(f"Invalid LLM response format (attempt {attempt + 1}): {result}")
+                    logger.warning(f"LLM result missing required fields: {result}")
 
             except json.JSONDecodeError as e:
-                logger.warning(f"JSON parse error (attempt {attempt + 1}): {e}")
-                logger.warning(f"Raw response: {response_text}")
+                logger.warning(f"JSON decode error (attempt {attempt + 1}): {e}")
+                logger.debug(f"Raw response: {response_text[:200]}")
 
             except Exception as e:
                 logger.warning(f"LLM classification error (attempt {attempt + 1}): {e}")
 
-            # Add small delay between retries
             if attempt < max_retries:
-                time.sleep(0.5)
+                time.sleep(1)  # Brief pause before retry
 
-        logger.error(f"LLM classification failed after {max_retries + 1} attempts")
         return None
 
-    def _prepare_text_for_llm(self, text: str, max_chars: int = 1500) -> str:
-        """Prepare text sample for LLM analysis."""
+    def _enhanced_pattern_classification(self, text: str, source: str) -> Dict[str, Any]:
+        """Enhanced pattern-based fallback with better Matrix detection."""
 
-        if len(text) <= max_chars:
-            return text
+        text_lower = text.lower()
 
-        # Take first part + last part for context
-        first_part = text[:max_chars // 2]
-        last_part = text[-max_chars // 2:]
-
-        return f"{first_part}\n\n[... content truncated ...]\n\n{last_part}"
-
-    def _clean_json_response(self, response: str) -> str:
-        """Clean LLM response to extract valid JSON from reasoning models."""
-
-        # Handle multiple patterns of thinking tags
-        patterns_to_remove = [
-            r'<think>.*?</think>',  # Normal thinking blocks
-            r'<thinking>.*?</thinking>',  # Alternative thinking blocks
-            r'<think><think>.*?</think>',  # Nested opening tags
-            r'<think>.*?</think></think>',  # Nested closing tags
-        ]
-
-        for pattern in patterns_to_remove:
-            response = re.sub(pattern, '', response, flags=re.DOTALL)
-
-        # Handle unclosed thinking tags - remove everything from <think> to first {
-        if '<think>' in response and response.count('<think>') != response.count('</think>'):
-            # Find the last <think> without matching </think>
-            parts = response.split('<think>')
-            if len(parts) > 1:
-                # Keep everything before first <think>, then look for JSON after
-                before_think = parts[0]
-                after_think = '<think>'.join(parts[1:])
-
-                # Look for JSON in the after_think portion
-                json_start = after_think.find('{')
-                if json_start != -1:
-                    response = before_think + after_think[json_start:]
-                else:
-                    response = before_think
-
-        # Remove markdown code blocks
-        response = re.sub(r'```json\s*', '', response, flags=re.DOTALL)
-        response = re.sub(r'```\s*', '', response, flags=re.DOTALL)
-
-        # Find JSON object boundaries
-        start = response.find('{')
-        end = response.rfind('}') + 1
-
-        if start != -1 and end > start:
-            return response[start:end]
-
-        return response.strip()
-
-    def _validate_llm_result(self, result: Dict) -> bool:
-        """Validate LLM classification result format."""
-
-        # Required fields
-        required_keys = ["categories", "content_type", "contains_rules"]
-
-        if not all(key in result for key in required_keys):
-            return False
-
-        if not isinstance(result["categories"], list):
-            return False
-
-        # Confidence is optional - add default if missing
-        if "confidence" not in result:
-            result["confidence"] = 0.7  # Default confidence
-
-        if not isinstance(result["confidence"], (int, float)):
-            return False
-
-        if result["confidence"] < 0 or result["confidence"] > 1:
-            return False
-
-        return True
-
-    def _create_metadata_from_llm_result(self, llm_result: Dict, text: str, source: str) -> Dict[str, Any]:
-        """Create full metadata object from LLM classification result."""
-
-        categories = llm_result.get("categories", ["General"])
-        primary_category = categories[0] if categories else "General"
-
-        # Build comprehensive metadata
-        metadata = {
-            "source": source,
-            "document_type": self._detect_document_type(text, source),
-            "edition": self._detect_edition(text, source),
-            "sections": categories,
-            "primary_section": primary_category,
-            "main_section": primary_category,  # For compatibility
-            "confidence_scores": {primary_category: llm_result.get("confidence", 0.7)},
-            "content_type": llm_result.get("content_type", "general"),
-            "contains_dice_pools": self._contains_dice_pools(text),
-            "contains_tables": self._contains_tables(text),
-            "is_rule_definition": llm_result.get("contains_rules", False),
-            "mechanical_keywords": self._extract_mechanical_keywords(text),
-            "page_references": self._extract_page_references(text),
-            "llm_reasoning": llm_result.get("reasoning", ""),
-            "classification_method": "llm",
-            "llm_confidence": llm_result.get("confidence", 0.7)
+        # Enhanced Matrix detection patterns
+        matrix_patterns = {
+            "ic_specific": ["black ic", "white ic", "gray ic", "ic attack", "types of ic"],
+            "hacking": ["hack", "matrix action", "cyberdeck", "data processing"],
+            "matrix_damage": ["matrix damage", "biofeedback", "dumpshock", "resistance test"],
+            "matrix_tests": ["firewall", "sleaze", "attack rating", "matrix attributes"]
         }
 
-        return metadata
+        combat_patterns = ["damage", "armor", "weapon", "initiative", "attack roll"]
+        magic_patterns = ["spell", "magic", "astral", "spirit", "drain"]
+        skills_patterns = ["dice pool", "threshold", "skill test", "extended test"]
 
-    def _create_index_metadata(self, source: str) -> Dict[str, Any]:
-        """Create metadata for index content (to be excluded)."""
+        # Score sections with enhanced Matrix detection
+        section_scores = {}
+
+        # Matrix scoring (enhanced for IC detection)
+        matrix_score = 0
+        for category, patterns in matrix_patterns.items():
+            for pattern in patterns:
+                if pattern in text_lower:
+                    matrix_score += 3 if category == "ic_specific" else 1
+
+        if matrix_score > 0:
+            section_scores["Matrix"] = matrix_score
+
+        # Other sections
+        for pattern in combat_patterns:
+            if pattern in text_lower:
+                section_scores["Combat"] = section_scores.get("Combat", 0) + 1
+
+        for pattern in magic_patterns:
+            if pattern in text_lower:
+                section_scores["Magic"] = section_scores.get("Magic", 0) + 1
+
+        for pattern in skills_patterns:
+            if pattern in text_lower:
+                section_scores["Game_Mechanics"] = section_scores.get("Game_Mechanics", 0) + 1
+
+        # Determine primary section
+        if section_scores:
+            primary_section = max(section_scores, key=section_scores.get)
+        else:
+            primary_section = "Setting"
+
+        # Content type determination
+        content_type = "explicit_rule" if any(term in text_lower for term in
+                                            ["dice pool", "test:", "roll", "resistance"]) else "narrative"
+
+        # Rule detection
+        contains_rules = any(term in text_lower for term in
+                           ["dice pool", "test", "roll", "damage", "threshold"])
 
         return {
             "source": source,
-            "document_type": "index_excluded",
-            "edition": "unknown",
-            "sections": ["Index_Excluded"],
-            "primary_section": "Index_Excluded",
-            "main_section": "Index_Excluded",
-            "confidence_scores": {},
-            "content_type": "index",
-            "contains_dice_pools": False,
-            "contains_tables": False,
-            "is_rule_definition": False,
-            "mechanical_keywords": [],
-            "page_references": [],
-            "classification_method": "rule_based"
+            "document_type": "rulebook",
+            "edition": "SR5",
+            "primary_section": primary_section,
+            "content_type": content_type,
+            "contains_rules": contains_rules,
+            "is_rule_definition": contains_rules,
+            "contains_dice_pools": "dice pool" in text_lower,
+            "contains_examples": any(term in text_lower for term in ["example", "suppose", "let's say"]),
+            "confidence": max(section_scores.values()) / 5.0 if section_scores else 0.3,
+            "confidence_scores": section_scores,
+            "mechanical_keywords": self._extract_keywords(text_lower),
+            "specific_topics": self._extract_topics(text_lower),
+            "classification_method": "enhanced_pattern"
         }
 
-    def _is_index_content(self, text: str) -> bool:
-        """Detect master index content that should be excluded."""
-
-        # Count page reference patterns like "**SR5** 169"
-        page_ref_pattern = r'\*\*[A-Z0-9]+\*\*\s+\d+[-,\s\d]*'
-        page_ref_count = len(re.findall(page_ref_pattern, text))
-
-        # Index content is dense with page references
-        if page_ref_count > 20:
-            return True
-
-        # Check for explicit index indicators
-        index_indicators = [
-            "master index", "shadowrun, fifth edition master index",
-            "table of contents"
-        ]
+    def _create_metadata_from_llm_result(self, llm_result: Dict, text: str, source: str) -> Dict[str, Any]:
+        """Convert LLM result to full metadata structure."""
 
         text_lower = text.lower()
-        if any(indicator in text_lower for indicator in index_indicators):
+
+        return {
+            "source": source,
+            "document_type": "rulebook",
+            "edition": "SR5",
+            "primary_section": llm_result["primary_section"],
+            "content_type": llm_result["content_type"],
+            "contains_rules": llm_result["contains_rules"],
+            "is_rule_definition": llm_result["contains_rules"],
+            "contains_dice_pools": llm_result.get("contains_dice_pools", "dice pool" in text_lower),
+            "contains_examples": llm_result.get("contains_examples", False),
+            "confidence": llm_result["confidence"],
+            "mechanical_keywords": llm_result.get("mechanical_keywords", []),
+            "specific_topics": llm_result.get("specific_topics", []),
+            "classification_method": "llm_qwen2.5"
+        }
+
+    def _extract_keywords(self, text_lower: str) -> List[str]:
+        """Extract mechanical keywords from text."""
+        keywords = []
+        patterns = ["dice pool", "test", "threshold", "modifier", "resistance", "damage", "armor"]
+        for pattern in patterns:
+            if pattern in text_lower:
+                keywords.append(pattern)
+        return keywords
+
+    def _extract_topics(self, text_lower: str) -> List[str]:
+        """Extract specific topics from text."""
+        topics = []
+        topic_patterns = ["black ic", "white ic", "matrix damage", "biofeedback", "firewall", "sleaze"]
+        for topic in topic_patterns:
+            if topic in text_lower:
+                topics.append(topic)
+        return topics
+
+    def _is_index_content(self, text: str) -> bool:
+        """Check if content is index/reference material."""
+        text_lower = text.lower()
+        index_indicators = ["table of contents", "index", "page", "see also", "refer to"]
+
+        # Short content that's mostly page references
+        if len(text) < 200 and any(indicator in text_lower for indicator in index_indicators):
             return True
 
-        # Check ratio of page refs to content length
-        if len(text) > 0 and page_ref_count / len(text) * 1000 > 5:
+        # High density of page references
+        page_refs = len(re.findall(r'\b(?:page|p\.)\s*\d+', text_lower))
+        if page_refs > 3 and len(text) < 500:
             return True
 
         return False
 
-    def _detect_document_type(self, text: str, source: str) -> str:
-        """Detect document type from content and filename."""
-
-        text_lower = text.lower()
-        filename_lower = Path(source).name.lower()
-
-        if "character" in filename_lower or "sheet" in filename_lower:
-            return "character_sheet"
-
-        if any(term in text_lower for term in ["core rules", "rulebook", "dice pool", "test"]):
-            return "rulebook"
-
-        if "adventure" in filename_lower or "scenario" in text_lower:
-            return "adventure"
-
-        return "unknown"
-
-    def _detect_edition(self, text: str, source: str) -> str:
-        """Detect Shadowrun edition."""
-
-        combined_text = f"{Path(source).name} {text[:1000]}".lower()
-
-        edition_patterns = {
-            "SR6": ["shadowrun 6", "6th edition", "sr6", "sixth edition"],
-            "SR5": ["shadowrun 5", "5th edition", "sr5", "fifth edition"],
-            "SR4": ["shadowrun 4", "4th edition", "sr4", "fourth edition"]
+    def _create_index_metadata(self, source: str) -> Dict[str, Any]:
+        """Create metadata for index content."""
+        return {
+            "source": source,
+            "document_type": "reference",
+            "edition": "SR5",
+            "primary_section": "Reference",
+            "content_type": "reference",
+            "contains_rules": False,
+            "is_rule_definition": False,
+            "contains_dice_pools": False,
+            "contains_examples": False,
+            "confidence": 0.9,
+            "classification_method": "index_filter"
         }
-
-        for edition, patterns in edition_patterns.items():
-            if any(pattern in combined_text for pattern in patterns):
-                return edition
-
-        return "unknown"
-
-    def _contains_dice_pools(self, text: str) -> bool:
-        """Check if content contains dice pool references."""
-        dice_patterns = [r"dice pool", r"\d+d6", r"roll.*\+", r"test.*:", r"threshold.*\d+"]
-        return any(re.search(pattern, text, re.IGNORECASE) for pattern in dice_patterns)
-
-    def _contains_tables(self, text: str) -> bool:
-        """Check if content contains tables."""
-        return text.count("|") > 10 and ("---" in text or re.search(r"\|\s*\w+\s*\|\s*\d+\s*\|", text))
-
-    def _extract_mechanical_keywords(self, text: str) -> List[str]:
-        """Extract game mechanical terms."""
-
-        keywords = []
-        text_lower = text.lower()
-
-        # Attributes
-        attributes = ["body", "agility", "reaction", "strength", "charisma",
-                      "intuition", "logic", "willpower", "edge", "magic", "resonance"]
-        keywords.extend([attr for attr in attributes if attr in text_lower])
-
-        # Game mechanics
-        mechanics = ["initiative", "dice pool", "threshold", "hits", "glitch",
-                     "armor", "damage", "stun", "physical", "condition monitor"]
-        keywords.extend([mech for mech in mechanics if mech in text_lower])
-
-        return list(set(keywords))
-
-    def _extract_page_references(self, text: str) -> List[str]:
-        """Extract page references from text."""
-
-        pattern = r'\[([^\]]+)\]\(#page-(\d+)-(\d+)\)'
-        matches = re.findall(pattern, text)
-
-        return [f"{name} (page {page})" for name, page, _ in matches]
 
 
 class PatternBasedFallback:
-    """Fallback pattern-based classifier when LLM is unavailable."""
+    """Basic pattern fallback for when LLM fails completely."""
 
     def __init__(self):
         self.section_patterns = {
-            "Combat": ["damage", "armor", "weapon", "initiative", "attack"],
-            "Magic": ["spell", "magic", "astral", "spirit", "mage"],
-            "Matrix": ["matrix", "decker", "program", "hacking", "cyberdeck"],
-            "Skills": ["test", "dice pool", "threshold", "skill"],
-            "Gear": ["gear", "equipment", "cost", "availability"]
+            "Matrix": ["matrix", "ic", "hack", "cyberdeck", "firewall", "sleaze", "data processing"],
+            "Combat": ["damage", "armor", "weapon", "initiative", "attack", "condition monitor"],
+            "Magic": ["spell", "magic", "astral", "spirit", "mage", "drain", "force"],
+            "Skills": ["test", "dice pool", "threshold", "skill", "specialization"],
+            "Gear": ["gear", "equipment", "cost", "availability", "rating"]
         }
 
     def classify_content(self, text: str, source: str) -> Dict[str, Any]:
-        """Simple pattern-based classification."""
+        """Emergency fallback classification."""
 
         text_lower = text.lower()
 
-        # Score each section
         section_scores = {}
         for section, patterns in self.section_patterns.items():
             score = sum(1 for pattern in patterns if pattern in text_lower)
             if score > 0:
                 section_scores[section] = score
 
-        # Determine primary section
-        if section_scores:
-            primary_section = max(section_scores, key=section_scores.get)
-            sections = [primary_section]
-        else:
-            primary_section = "General"
-            sections = ["General"]
+        primary_section = max(section_scores, key=section_scores.get) if section_scores else "Setting"
 
         return {
             "source": source,
             "document_type": "rulebook",
-            "edition": "unknown",
-            "sections": sections,
+            "edition": "SR5",
             "primary_section": primary_section,
-            "main_section": primary_section,
-            "confidence_scores": section_scores,
-            "content_type": "general",
+            "content_type": "explicit_rule" if "dice pool" in text_lower else "narrative",
+            "contains_rules": "dice pool" in text_lower or "test" in text_lower,
+            "is_rule_definition": "dice pool" in text_lower or "test" in text_lower,
             "contains_dice_pools": "dice pool" in text_lower,
-            "contains_tables": text.count("|") > 5,
-            "is_rule_definition": "test" in text_lower or "dice pool" in text_lower,
-            "mechanical_keywords": [],
-            "page_references": [],
-            "classification_method": "pattern_fallback"
+            "contains_examples": False,
+            "confidence": 0.4,
+            "classification_method": "emergency_fallback"
         }
 
 
-# Integration function for indexer.py
-def create_llm_classifier(model_name: str = "phi4-mini") -> LLMShadowrunClassifier:
-    """Factory function to create LLM classifier."""
-    return LLMShadowrunClassifier(model_name=model_name)
+# Factory function for indexer.py integration
+def create_llm_classifier(model_name: str = "qwen2.5:14b-instruct-q6_K") -> UnifiedShadowrunClassifier:
+    """Create unified classifier instance."""
+    return UnifiedShadowrunClassifier(model_name=model_name)

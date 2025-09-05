@@ -94,15 +94,15 @@ class ChunkAnalyzer:
         # 2. CLASSIFICATION ANALYSIS
         logger.info("🏷️  Analyzing classifications...")
 
-        main_sections = [meta.get('main_section', 'Unknown') for meta in metadatas]
+        primary_sections = [meta.get('primary_section', 'Unknown') for meta in metadatas]
         document_types = [meta.get('document_type', 'Unknown') for meta in metadatas]
         editions = [meta.get('edition', 'Unknown') for meta in metadatas]
 
         analysis["classification_analysis"] = {
-            "main_sections": dict(Counter(main_sections)),
+            "primary_sections": dict(Counter(primary_sections)),
             "document_types": dict(Counter(document_types)),
             "editions": dict(Counter(editions)),
-            "section_dominance": self._calculate_section_dominance(main_sections)
+            "section_dominance": self._calculate_section_dominance(primary_sections)
         }
 
         # 3. CONTENT QUALITY ANALYSIS
@@ -147,10 +147,10 @@ class ChunkAnalyzer:
         }
         return bins
 
-    def _calculate_section_dominance(self, main_sections):
+    def _calculate_section_dominance(self, primary_sections):
         """Calculate how dominant the top sections are."""
-        section_counts = Counter(main_sections)
-        total = len(main_sections)
+        section_counts = Counter(primary_sections)
+        total = len(primary_sections)
 
         if not section_counts:
             return {"error": "No sections found"}
@@ -297,7 +297,7 @@ class ChunkAnalyzer:
             if has_taser or (has_damage and any(kw in doc_lower for kw in ['electric', 'stun'])):
                 chunk_info = {
                     "chunk_index": i,
-                    "classification": metadatas[i].get('main_section', 'Unknown') if i < len(metadatas) else 'Unknown',
+                    "classification": metadatas[i].get('primary_section', 'Unknown') if i < len(metadatas) else 'Unknown',
                     "word_count": len(doc.split()),
                     "has_explicit_rule": 'dice pool' in doc_lower and 'resist' in doc_lower,
                     "is_example": any(ex in doc_lower for ex in ['example', 'e.g.', 'for instance']),
@@ -369,7 +369,7 @@ class ChunkAnalyzer:
             print(f"     {size_range}: {count:,} ({percentage:.1f}%)")
 
         print(f"\n🏷️  CLASSIFICATIONS:")
-        sections = analysis['classification_analysis']['main_sections']
+        sections = analysis['classification_analysis']['primary_sections']
         print(f"   Unique sections: {len(sections)}")
         for section, count in sorted(sections.items(), key=lambda x: x[1], reverse=True)[:5]:
             percentage = count / analysis['total_chunks'] * 100

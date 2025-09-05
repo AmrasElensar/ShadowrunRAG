@@ -6,7 +6,7 @@ Scans processed markdown files to extract skills, qualities, and gear.
 import re
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List
 import logging
 from dataclasses import dataclass
 

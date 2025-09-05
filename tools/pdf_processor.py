@@ -18,10 +18,8 @@ import time
 import fitz  # PyMuPDF
 from pathlib import Path
 from typing import Dict, Optional, Callable, List, Tuple
-from tools.llm_text_preprocessor import create_preprocessor
 from tools.regex_text_cleaner import create_regex_cleaner
 import traceback
-import re
 
 # Updated Marker imports (NEW API)
 try:
@@ -66,6 +64,7 @@ class SimpleProgressHandler(logging.Handler):
             "Converting PDF": ("marker_processing", 30, "Marker GPU acceleration active..."),
             "Extracting text": ("marker_extraction", 60, "GPU extracting text and layout..."),
             "Processing complete": ("marker_complete", 75, "Marker extraction complete"),
+
 
             # PyMuPDF + TOC stages
             "Reading PDF structure": ("toc_init", 15, "Analyzing PDF structure..."),
@@ -120,7 +119,6 @@ class EnhancedPDFProcessor:
     def __init__(
             self,
             output_dir: str = "data/processed_markdown",
-            chunk_size: int = 1024,
             use_ocr: bool = True,
             debug_mode: bool = True,
             progress_callback: Optional[Callable[[str, float, str], None]] = None,
@@ -131,7 +129,6 @@ class EnhancedPDFProcessor:
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.chunk_size = chunk_size
         self.use_ocr = use_ocr
         self.debug_mode = debug_mode
         self.progress_callback = progress_callback
@@ -217,8 +214,6 @@ class EnhancedPDFProcessor:
                 #'ollama_args': 'num_ctx 16384',
                 'force_ocr': False,  # Force OCR for complex layouts
                 'use_llm': False,  # Enable LLM post-processing
-                #'block_correction_prompt': shadowrun_prompt,
-                #'disable_image_extraction': True,
                 'debug': True,
             }
 
@@ -453,9 +448,6 @@ class EnhancedPDFProcessor:
                         page = pdf_document[page_num]
                         page_text = page.get_text()
 
-                        # Clean up common PDF artifacts
-                        page_text = self._clean_pdf_text(page_text)
-
                         if page_text.strip():
                             section_text += page_text + "\n"
                     except Exception as page_error:
@@ -487,9 +479,6 @@ class EnhancedPDFProcessor:
                 page = pdf_document[page_num]
                 page_text = page.get_text()
 
-                # Clean up text
-                page_text = self._clean_pdf_text(page_text)
-
                 if page_text.strip():
                     # Try to detect if this looks like a chapter/section start
                     lines = page_text.split('\n')
@@ -518,36 +507,6 @@ class EnhancedPDFProcessor:
         full_text = "\n".join(pages)
         logger.info(f"✅ Smart page extraction: {len(pages)} pages, {len(full_text)} characters")
         return full_text
-
-    def _clean_pdf_text(self, text: str) -> str:
-        """Clean common PDF extraction artifacts."""
-        if not text:
-            return ""
-
-        # Remove excessive whitespace
-        text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)  # Multiple newlines to double
-        text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces to single
-        text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)  # Trim lines
-
-        # Remove common PDF artifacts
-        text = re.sub(r'\f', '\n', text)  # Form feeds to newlines
-        text = re.sub(r'(\w)-\s*\n\s*(\w)', r'\1\2', text)  # Rejoin hyphenated words
-
-        # Remove isolated page numbers and headers/footers (simple heuristic)
-        lines = text.split('\n')
-        cleaned_lines = []
-
-        for line in lines:
-            line = line.strip()
-            # Skip lines that are just numbers (likely page numbers)
-            if line.isdigit() and len(line) <= 3:
-                continue
-            # Skip very short lines that might be headers/footers
-            if len(line) < 3:
-                continue
-            cleaned_lines.append(line)
-
-        return '\n'.join(cleaned_lines)
 
     def _extract_with_unstructured_fallback(self, pdf_path: Path) -> Optional[str]:
         """Tertiary method: Emergency unstructured fallback (fast strategy only)."""
@@ -625,9 +584,6 @@ class EnhancedPDFProcessor:
                 try:
                     page = pdf_document[page_num]
                     page_text = page.get_text()
-
-                    # Basic cleaning
-                    page_text = self._clean_pdf_text(page_text)
 
                     if page_text.strip():
                         text_parts.append(f"\n## Page {page_num + 1}\n\n{page_text.strip()}")
@@ -785,136 +741,25 @@ class EnhancedPDFProcessor:
         logger.error(f"💥 All extraction methods failed after {total_time:.1f}s")
         return f"# {pdf_path.stem}\n\nAll extraction methods failed"
 
-    def _detect_shadowrun_content(self, text: str, filename: str) -> Dict[str, str]:
-        """Enhanced Shadowrun-specific content detection and classification."""
-        content_lower = text[:3000].lower()  # Analyze first 3K characters
-        filename_lower = filename.lower()
-
-        metadata = {
-            "edition": "unknown",
-            "document_type": self.document_type,
-            "primary_focus": "general",
-            "detected_sections": [],
-            "extraction_quality": "unknown"
-        }
-
-        # Edition detection with comprehensive patterns
-        edition_patterns = {
-            "SR6": ["shadowrun 6", "6th edition", "sr6", "sixth edition", "catalyst game labs 2019", "catalyst 2019"],
-            "SR5": ["shadowrun 5", "5th edition", "sr5", "fifth edition", "catalyst game labs 2013", "catalyst 2013",
-                    "fifth world"],
-            "SR4": ["shadowrun 4", "4th edition", "sr4", "fourth edition", "catalyst game labs 2005", "wizkids",
-                    "fanpro"],
-            "SR3": ["shadowrun 3", "3rd edition", "sr3", "third edition", "fasa corporation", "fasa corp"],
-            "SR2": ["shadowrun 2", "2nd edition", "sr2", "second edition", "fasa 1992"],
-            "SR1": ["shadowrun 1", "1st edition", "sr1", "first edition", "fasa 1989", "original shadowrun"]
-        }
-
-        for edition, patterns in edition_patterns.items():
-            if any(pattern in content_lower or pattern in filename_lower for pattern in patterns):
-                metadata["edition"] = edition
-                break
-
-        # Document type refinement based on content analysis
-        type_indicators = {
-            "character_sheet": [
-                "character sheet", "player character", "npc", "attributes:", "skills:", "metatype:",
-                "priority system", "karma", "nuyen", "contacts:", "cyberware:", "bioware:",
-                "spells known", "adept powers", "essence", "magic rating", "street cred"
-            ],
-            "rulebook": [
-                "table of contents", "chapter", "game master", "dice pool", "threshold",
-                "glitch", "critical glitch", "extended test", "opposed test", "teamwork test",
-                "rule", "modifier", "game mechanics", "core rules"
-            ],
-            "universe_info": [
-                "sixth world", "awakening", "crash of", "matrix 2.0", "corporate court",
-                "dragon", "immortal elf", "history", "timeline", "shadowrunner",
-                "mr. johnson", "fixers", "seattle", "megacorp", "zaibatsu"
-            ],
-            "adventure": [
-                "adventure", "scenario", "gamemaster", "handout", "scene", "encounter",
-                "npc stats", "plot hook", "mission", "shadowrun", "team briefing",
-                "background", "getting started", "scenes"
-            ]
-        }
-
-        # Score each type and override if strong indicators found
-        type_scores = {}
-        for doc_type, indicators in type_indicators.items():
-            score = sum(1 for indicator in indicators if indicator in content_lower)
-            type_scores[doc_type] = score
-
-        if type_scores:
-            best_type = max(type_scores, key=type_scores.get)
-            if type_scores[best_type] > 3:  # Confidence threshold
-                metadata["document_type"] = best_type
-
-        # Section detection for better filtering
-        section_patterns = {
-            "Combat": ["combat", "initiative", "damage", "armor", "weapon", "attack", "defense", "wound"],
-            "Magic": ["magic", "spell", "astral", "summoning", "enchanting", "adept", "mage", "spirit"],
-            "Matrix": ["matrix", "hacking", "cyberdeck", "programs", "ic", "host", "decker", "technomancer"],
-            "Riggers": ["rigger", "drone", "vehicle", "pilot", "autosofts", "jumped in", "control rig"],
-            "Character Creation": ["character creation", "priority", "attributes", "skills", "metatype",
-                                   "build points"],
-            "Gear": ["gear", "equipment", "cyberware", "bioware", "weapons", "armor", "electronics"],
-            "Gamemaster": ["gamemaster", "gm", "adventure", "npc", "campaign", "plot", "scenario"],
-            "Setting": ["seattle", "sixth world", "corporations", "shadowrun", "awakening", "crash"],
-            "Social": ["social", "etiquette", "negotiation", "leadership", "contacts", "reputation"]
-        }
-
-        detected_sections = []
-        section_counts = {}
-
-        for section, patterns in section_patterns.items():
-            count = sum(content_lower.count(pattern) for pattern in patterns)
-            section_counts[section] = count
-            if count > 0:
-                detected_sections.append(section)
-
-        metadata["detected_sections"] = detected_sections
-
-        # Determine primary focus based on most mentioned section
-        if section_counts:
-            metadata["primary_focus"] = max(section_counts, key=section_counts.get)
-
-        # Assess extraction quality
-        if len(text) > 5000 and any(keyword in content_lower for keyword in ["shadowrun", "dice", "test", "skill"]):
-            metadata["extraction_quality"] = "high"
-        elif len(text) > 1000:
-            metadata["extraction_quality"] = "medium"
-        else:
-            metadata["extraction_quality"] = "low"
-
-        return metadata
-
-    def _save_single_file(self, full_text: str, output_dir: Path, pdf_name: str, content_metadata: Dict) -> Dict[
+    def _save_single_file(self, full_text: str, output_dir: Path, pdf_name: str) -> Dict[
         str, str]:
-        """Save the complete extracted text as a single markdown file for indexer chunking."""
+        """Save extracted text as plain markdown - no metadata header needed."""
 
-        # Create enhanced metadata header
-        metadata_header = self._create_enhanced_metadata_header(pdf_name, content_metadata)
+        # Just save the raw extracted text - no YAML frontmatter
+        md_content = full_text
 
-        # Combine metadata + full text
-        md_content = f"{metadata_header}\n\n{full_text}"
-
-        # Save as single file named after the PDF
         safe_filename = "".join(c for c in pdf_name if c.isalnum() or c in " _-").strip()
         safe_filename = safe_filename.replace(" ", "_") or "document"
-
         file_path = output_dir / f"{safe_filename}.md"
 
-        # Ensure unique filename if somehow conflicts
+        # Ensure unique filename
         counter = 1
         while file_path.exists():
             file_path = output_dir / f"{safe_filename}_{counter:02d}.md"
             counter += 1
 
-        # Save the file
         file_path.write_text(md_content, encoding='utf-8')
-
-        logger.info(f"💾 Saved single file: {file_path.name} ({len(full_text)} chars)")
+        logger.info(f"Saved clean text file: {file_path.name} ({len(full_text)} chars)")
 
         return {str(file_path): md_content}
 
@@ -959,24 +804,14 @@ class EnhancedPDFProcessor:
             extraction_time = time.time() - processing_start
             logger.info(f"✅ Extraction completed in {extraction_time:.1f}s")
 
-            # STAGE 2: Enhanced content analysis
-            if self.progress_callback:
-                self.progress_callback("analyzing", 60, "Analyzing Shadowrun content with enhanced detection...")
-
-            content_metadata = self._detect_shadowrun_content(full_text, pdf_name)
-
-            # Log detected metadata
-            logger.info(
-                f"📊 Detected: {content_metadata['document_type']} | {content_metadata['edition']} | {content_metadata['primary_focus']}")
-
-            # STAGE 3: Save SINGLE markdown file (NO CHUNKING HERE)
+            # Save SINGLE markdown file (NO CHUNKING HERE)
             if self.progress_callback:
                 self.progress_callback("saving", 90, "Saving single markdown file for indexer chunking...")
 
-            saved_files = self._save_single_file(full_text, output_subdir, pdf_name, content_metadata)
+            saved_files = self._save_single_file(full_text, output_subdir, pdf_name)
 
-            # STAGE 4: Save comprehensive metadata
-            self._save_enhanced_metadata(json_meta, pdf_path, 1, content_metadata, extraction_time)  # 1 file created
+            # Save comprehensive metadata
+            self._save_enhanced_metadata(json_meta, pdf_path, extraction_time)
 
             # Final success
             total_time = time.time() - processing_start
@@ -1013,20 +848,6 @@ class EnhancedPDFProcessor:
             # Clear GPU cache if we used it
             self._clear_gpu_cache()
 
-    def _create_enhanced_metadata_header(self, pdf_name: str, content_metadata: Dict) -> str:
-        """Create comprehensive YAML front matter for markdown files."""
-        return f"""---
-title: "{pdf_name}"
-document_type: "{content_metadata.get('document_type', 'unknown')}"
-edition: "{content_metadata.get('edition', 'unknown')}"
-primary_focus: "{content_metadata.get('primary_focus', 'general')}"
-detected_sections: {content_metadata.get('detected_sections', [])}
-extraction_quality: "{content_metadata.get('extraction_quality', 'unknown')}"
-processor_version: "enhanced_4tier_v2_new_marker_api"
-processed_date: "{time.strftime('%Y-%m-%d %H:%M:%S')}"
-extraction_hierarchy: ["marker_gpu_new_api", "pymupdf_toc", "unstructured_emergency", "basic_text"]
----"""
-
     def _load_existing_files(self, output_dir: Path) -> Dict[str, str]:
         """Load existing markdown files."""
         return {
@@ -1035,20 +856,16 @@ extraction_hierarchy: ["marker_gpu_new_api", "pymupdf_toc", "unstructured_emerge
             if not f.name.startswith('_')  # Skip metadata files
         }
 
-    def _save_enhanced_metadata(self, json_meta: Path, pdf_path: Path, chunks_created: int,
-                                content_metadata: Dict, extraction_time: float):
+    def _save_enhanced_metadata(self, json_meta: Path, pdf_path: Path, extraction_time: float):
         """Save comprehensive processing metadata."""
         metadata = {
             "source": str(pdf_path),
             "processed_at": time.strftime('%Y-%m-%d %H:%M:%S'),
             "processor_version": "enhanced_4tier_v2_new_marker_api",
             "extraction_time_seconds": round(extraction_time, 2),
-            "chunks_created": chunks_created,
             "document_type": self.document_type,
-            "content_metadata": content_metadata,
             "extraction_hierarchy": ["marker_gpu_new_api", "pymupdf_toc", "unstructured_emergency", "basic_text"],
             "processing_config": {
-                "chunk_size": self.chunk_size,
                 "use_gpu": self.use_gpu,
                 "use_ocr": self.use_ocr,
                 "debug_mode": self.debug_mode
@@ -1248,8 +1065,7 @@ extraction_hierarchy: ["marker_gpu_new_api", "pymupdf_toc", "unstructured_emerge
                 page_text = page.get_text()
 
                 if page_text.strip():
-                    cleaned_text = self._clean_pdf_text(page_text)
-                    section_text.append(cleaned_text)
+                    section_text.append(page_text)
 
             doc.close()
             return "\n\n".join(section_text)

@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, F
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import Optional, Dict
 from pathlib import Path
 import logging
 import json
@@ -317,11 +317,11 @@ async def query(request: QueryRequest):
 
             role_section = role_to_section.get(request.character_role.lower())
             if role_section:
-                where_filter["main_section"] = role_section
+                where_filter["primary_section"] = role_section
                 logger.info(f"Character role '{request.character_role}' mapped to section '{role_section}'")
         elif request.filter_section and request.filter_section.strip() and request.filter_section != "All":
             # Manual section filter only if no character role
-            where_filter["main_section"] = request.filter_section
+            where_filter["primary_section"] = request.filter_section
 
         # Subsection filter
         if request.filter_subsection and request.filter_subsection.strip():
@@ -372,9 +372,9 @@ async def query_stream(request: QueryRequest):
             }
             role_section = role_to_section.get(request.character_role.lower())
             if role_section:
-                where_filter["main_section"] = role_section
+                where_filter["primary_section"] = role_section
         elif request.filter_section and request.filter_section.strip() and request.filter_section != "All":
-            where_filter["main_section"] = request.filter_section
+            where_filter["primary_section"] = request.filter_section
 
         if request.filter_subsection and request.filter_subsection.strip():
             where_filter["subsection"] = request.filter_subsection
@@ -534,7 +534,7 @@ async def get_document_stats():
             stats["editions"][edition] = stats["editions"].get(edition, 0) + 1
 
             # Count sections
-            section = metadata.get('main_section', 'unknown')
+            section = metadata.get('primary_section', 'unknown')
             stats["sections"][section] = stats["sections"].get(section, 0) + 1
 
             # Track unique sources
@@ -1321,18 +1321,18 @@ async def debug_metadata_values():
         # Get a sample of documents to see metadata structure
         sample = retriever.collection.peek(limit=20)
 
-        main_sections = set()
+        primary_sections = set()
         editions = set()
 
         for metadata in sample['metadatas']:
             if metadata:
-                if 'main_section' in metadata:
-                    main_sections.add(metadata['main_section'])
+                if 'primary_section' in metadata:
+                    primary_sections.add(metadata['primary_section'])
                 if 'edition' in metadata:
                     editions.add(metadata['edition'])
 
         return {
-            "main_sections": list(main_sections),
+            "primary_sections": list(primary_sections),
             "editions": list(editions),
             "sample_metadata": sample['metadatas'][:3]  # First 3 for inspection
         }
@@ -1349,14 +1349,14 @@ async def debug_retrieval(request: dict):
 
         # Build filter from request
         where_filter = {}
-        if request.get("main_section"):
-            where_filter["main_section"] = request["main_section"]
+        if request.get("primary_section"):
+            where_filter["primary_section"] = request["primary_section"]
         if request.get("content_type"):
             where_filter["content_type"] = request["content_type"]
         if request.get("document_type"):
             where_filter["document_type"] = request["document_type"]
         if request.get("contains_rules") is not None:
-            where_filter["is_rule_definition"] = request["contains_rules"]
+            where_filter["contains_rules"] = request["contains_rules"]
 
         logger.info(f"Debug retrieval with filter: {where_filter}")
 
@@ -1379,7 +1379,7 @@ async def debug_retrieval(request: dict):
         for i, (doc, meta) in enumerate(zip(results.get('documents', []), results.get('metadatas', []))):
             response["chunks"].append({
                 "index": i,
-                "classification": meta.get('main_section', 'Unknown'),
+                "classification": meta.get('primary_section', 'Unknown'),
                 "content_type": meta.get('content_type', 'unknown'),
                 "contains_rules": meta.get('is_rule_definition', False),
                 "word_count": len(doc.split()),

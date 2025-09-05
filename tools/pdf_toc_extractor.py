@@ -103,7 +103,7 @@ def get_section_mapping(nested_toc: Dict[str, Any]) -> Dict[str, str]:
     Generate a mapping of section titles to their top-level parent.
     This helps identify which main section a subtitle belongs to.
 
-    Returns: {"subtitle": "main_section_name", ...}
+    Returns: {"subtitle": "primary_section_name", ...}
     """
     mapping = {}
 
@@ -148,6 +148,6 @@ if __name__ == "__main__":
 
     print(f"\nSection mapping:")
     mapping = get_section_mapping(nested_toc)
-    for subtitle, main_section in mapping.items():
-        if subtitle != main_section:  # Only show subsections
-            print(f"  '{subtitle}' -> '{main_section}'")
+    for subtitle, primary_section in mapping.items():
+        if subtitle != primary_section:  # Only show subsections
+            print(f"  '{subtitle}' -> '{primary_section}'")

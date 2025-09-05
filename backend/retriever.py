@@ -73,8 +73,8 @@ class Retriever:
     ):
         self.chroma_path = chroma_path or os.getenv("CHROMA_DB_PATH", "data/chroma_db")
         self.collection_name = collection_name or os.getenv("COLLECTION_NAME", "shadowrun_docs")
-        self.embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL", "mxbai-embed-large")
-        self.llm_model = llm_model or os.getenv("LLM_MODEL", "phi4-reasoning:plus")
+        self.embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+        self.llm_model = llm_model or os.getenv("LLM_MODEL", "")
 
         self.client = chromadb.PersistentClient(
             path=self.chroma_path,
@@ -150,8 +150,8 @@ class Retriever:
 
             # Remove any existing section filters and replace with role-based section
             final_filter.pop("Section", None)
-            final_filter.pop("main_section", None)
-            final_filter["main_section"] = role_section
+            final_filter.pop("primary_section", None)
+            final_filter["primary_section"] = role_section
 
             logger.info(f"Character role '{character_role}' overrode section filter → '{role_section}'")
 
@@ -316,7 +316,7 @@ class Retriever:
             # Get enhanced metadata fields
             doc_type = meta.get('document_type', 'unknown')
             edition = meta.get('edition', 'unknown')
-            section = meta.get('main_section', meta.get('Section', 'General'))
+            section = meta.get('primary_section', meta.get('Section', 'General'))
             subsection = meta.get('subsection', meta.get('Subsection', 'General'))
 
             # Build enhanced context header
@@ -697,7 +697,7 @@ class Retriever:
             metadata_analysis["metadata_fields"] = list(metadata_analysis["metadata_fields"])
 
             # Check for expected fields
-            expected_fields = ["main_section", "document_type", "edition", "source"]
+            expected_fields = ["primary_section", "document_type", "edition", "source"]
             for field in expected_fields:
                 if field not in metadata_analysis["metadata_fields"]:
                     metadata_analysis["missing_fields"].append(field)

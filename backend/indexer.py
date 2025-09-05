@@ -9,7 +9,6 @@ from chromadb.config import Settings
 import ollama
 from tqdm import tqdm
 import logging
-from tools.llm_classifier import create_llm_classifier
 
 # Check for optional dependencies
 try:
@@ -18,13 +17,6 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
     logging.warning("tiktoken not available - using word-based chunking")
-
-try:
-    from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-    LANGCHAIN_AVAILABLE = True
-except ImportError:
-    LANGCHAIN_AVAILABLE = False
-    logging.warning("LangChain not installed. Install with: pip install langchain langchain-community")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,8 +28,8 @@ class IncrementalIndexer:
         self,
         chroma_path: str = "data/chroma_db",
         collection_name: str = "shadowrun_docs",
-        embedding_model: str = "bge-m3",
-        chunk_size: int = 1024,           # Increased from 512 for better performance
+        embedding_model: str = "nomic-embed-text",
+        chunk_size: int = 800,
         chunk_overlap: int = 150,         # Increased proportionally
         use_semantic_splitting: bool = True
     ):
@@ -58,7 +50,7 @@ class IncrementalIndexer:
         self.embedding_model = embedding_model
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self.use_semantic_splitting = use_semantic_splitting and LANGCHAIN_AVAILABLE
+        self.use_semantic_splitting = use_semantic_splitting
 
         # Track indexed files
         self.index_file = self.chroma_path / "indexed_files.json"
@@ -87,190 +79,26 @@ class IncrementalIndexer:
         """Get hash of file content for change detection."""
         return hashlib.md5(file_path.read_bytes()).hexdigest()
 
-    def _extract_shadowrun_metadata(self, content: str, source: str) -> Dict:
-        logger.info("Using NEW LLM-based classification")  # Add this line
-
-        if not hasattr(self, '_llm_classifier'):
-            from tools.llm_classifier import create_llm_classifier
-            self._llm_classifier = create_llm_classifier(model_name="phi4-mini")
-            logger.info("Initialized LLM-based classifier with phi4-mini")
-
-        return self._llm_classifier.classify_content(content, source)
-
     def _chunk_text_semantic(self, text: str, source: str) -> List[Dict]:
-        """REPLACE this entire function with the improved version."""
+        """Updated to use clean semantic chunker with existing regex cleaner."""
 
         if not self.use_semantic_splitting:
             return self._chunk_text_simple(text, source)
 
-        # Import the improved chunker
-        if not hasattr(self, '_improved_chunker'):
-            from tools.improved_classifier import ImprovedSemanticChunker
-            self._improved_chunker = ImprovedSemanticChunker(chunk_size=800, overlap=100)
+        # Import the clean chunker
+        if not hasattr(self, '_clean_chunker'):
+            from tools.improved_classifier import create_semantic_chunker
+            self._clean_chunker = create_semantic_chunker(chunk_size=800, overlap=150)
 
-        return self._improved_chunker.chunk_document(text, source, self._count_tokens)
-
-    def _split_by_main_headers(self, text: str) -> List[Dict]:
-        """Split text by main headers (# ), preserving all content."""
-        lines = text.split('\n')
-        sections = []
-        current_content = []
-        current_title = "Introduction"  # Default for content before first header
-
-        for line in lines:
-            # Check for main header (single # at start of line, not ## or ###)
-            if line.strip().startswith('# ') and not line.strip().startswith('##'):
-                # Save previous section if it has content
-                if current_content:
-                    sections.append({
-                        'title': current_title,
-                        'content': '\n'.join(current_content).strip()
-                    })
-
-                # Start new section
-                current_title = line.strip()[2:].strip()  # Remove '# '
-                current_content = [line]  # Include the header line itself
-
-            else:
-                # Add all lines to current section
-                current_content.append(line)
-
-        # Add the final section
-        if current_content:
-            sections.append({
-                'title': current_title,
-                'content': '\n'.join(current_content).strip()
-            })
-
-        # Filter out empty sections
-        sections = [s for s in sections if s['content'].strip()]
-
-        logger.info(f"Split document into {len(sections)} sections:")
-        for i, section in enumerate(sections):
-            token_count = self._count_tokens(section['content'])
-            logger.info(f"  {i + 1}. '{section['title']}': {token_count} tokens")
-
-        return sections
-
-    def _split_large_section_simple(self, content: str, section_title: str, section_id: str,
-                                    base_metadata: Dict, source: str) -> List[Dict]:
-        """Split a large section into smaller chunks using simple paragraph splitting."""
-
-        # Simple paragraph-based splitting
-        paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
-
-        if not paragraphs:
-            # Emergency: just split by sentences
-            sentences = [s.strip() for s in content.split('.') if s.strip()]
-            paragraphs = sentences
-
-        chunks = []
-        current_chunk = []
-        current_tokens = 0
-        max_tokens = 2048
-
-        for paragraph in paragraphs:
-            para_tokens = self._count_tokens(paragraph)
-
-            # If adding this paragraph would exceed limit, finalize current chunk
-            if current_tokens + para_tokens > max_tokens and current_chunk:
-                # Save current chunk
-                chunk_content = '\n\n'.join(current_chunk)
-                chunks.append(chunk_content)
-
-                # Start new chunk
-                current_chunk = [paragraph]
-                current_tokens = para_tokens
-            else:
-                # Add to current chunk
-                current_chunk.append(paragraph)
-                current_tokens += para_tokens
-
-        # Don't forget the last chunk
-        if current_chunk:
-            chunk_content = '\n\n'.join(current_chunk)
-            chunks.append(chunk_content)
-
-        # Convert to chunk objects with metadata
-        chunk_objects = []
-        total_parts = len(chunks)
-
-        for i, chunk_content in enumerate(chunks):
-            chunk_metadata = {
-                **base_metadata,
-                "section_id": section_id,
-                "section_title": section_title,
-                "chunk_index": i,
-                "total_chunks_in_section": total_parts,
-                "section_complete": False,  # Multi-part section
-                "continuation_of": section_id if i > 0 else None,
-                "token_count": self._count_tokens(chunk_content)
-            }
-
-            chunk_objects.append({
-                "text": chunk_content,
-                "source": source,
-                "metadata": chunk_metadata
-            })
-
-        logger.info(f"Split large section '{section_title}' into {total_parts} chunks")
-        return chunk_objects
-
-    def _generate_section_id(self, section_title: str) -> str:
-        """Generate clean section ID from title."""
-        import re
-        # Remove special characters, keep alphanumeric and spaces
-        clean_title = re.sub(r'[^a-zA-Z0-9\s]', '', section_title)
-        # Replace spaces with underscores, limit length
-        clean_title = re.sub(r'\s+', '_', clean_title.strip())
-        return clean_title.lower()[:50]
-
-    def _add_sequential_links(self, chunks: List[Dict]) -> None:
-        """Add prev_chunk/next_chunk links to all chunks."""
-
-        for i, chunk in enumerate(chunks):
-            metadata = chunk['metadata']
-
-            # Add global chunk linking (across all chunks in document)
-            if i > 0:
-                metadata['prev_chunk_global'] = f"chunk_{i - 1:03d}"
-            if i < len(chunks) - 1:
-                metadata['next_chunk_global'] = f"chunk_{i + 1:03d}"
-
-            # Add section-specific linking (within same section)
-            section_id = metadata.get('section_id')
-            if section_id:
-                # Find other chunks in same section
-                section_chunks = [
-                    (j, c) for j, c in enumerate(chunks)
-                    if c['metadata'].get('section_id') == section_id
-                ]
-
-                # Find current chunk's position within its section
-                section_position = None
-                for pos, (chunk_idx, _) in enumerate(section_chunks):
-                    if chunk_idx == i:
-                        section_position = pos
-                        break
-
-                if section_position is not None:
-                    # Add section-specific prev/next links
-                    if section_position > 0:
-                        prev_global_idx = section_chunks[section_position - 1][0]
-                        metadata['prev_chunk_section'] = f"chunk_{prev_global_idx:03d}"
-
-                    if section_position < len(section_chunks) - 1:
-                        next_global_idx = section_chunks[section_position + 1][0]
-                        metadata['next_chunk_section'] = f"chunk_{next_global_idx:03d}"
-
-            # Add a unique chunk ID for reference
-            metadata['chunk_id'] = f"chunk_{i:03d}"
-
-        logger.info(f"Added sequential links to {len(chunks)} chunks")
+        return self._clean_chunker.chunk_document(text, source, self._count_tokens)
 
     def _chunk_text_simple(self, text: str, source: str) -> List[Dict]:
         """Simple word/token-based chunking fallback with enhanced metadata."""
-        base_metadata = self._extract_shadowrun_metadata(text, source)
+        base_metadata = {
+            "document_type": "rulebook",
+            "edition": "SR5",
+            "primary_section": "Unknown"
+        }
 
         if TIKTOKEN_AVAILABLE:
             # Token-based chunking
