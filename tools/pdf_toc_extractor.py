@@ -7,7 +7,7 @@ to avoid title conflicts in multi-section documents
 import fitz
 import json
 from pathlib import Path
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any
 
 
 def extract_nested_toc_from_pdf(pdf_path: str, output_file: str = None) -> Dict[str, Any]:

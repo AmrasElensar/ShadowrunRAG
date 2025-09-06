@@ -20,8 +20,9 @@ from pathlib import Path
 from typing import Dict, Optional, Callable, List, Tuple
 from tools.regex_text_cleaner import create_regex_cleaner
 import traceback
+from tools.pdf_toc_extractor import extract_nested_toc_from_pdf
+from tools.shadowrun_header_restructuring import NestedShadowrunHeaderFixer
 
-# Updated Marker imports (NEW API)
 try:
     from marker.converters.pdf import PdfConverter
     from marker.models import create_model_dict
@@ -135,7 +136,6 @@ class EnhancedPDFProcessor:
         self.document_type = document_type
         self.use_gpu = use_gpu
 
-        # NEW: Updated model cache for new Marker API
         self._marker_converter = None
         self._models_loading = False
 
@@ -670,8 +670,6 @@ class EnhancedPDFProcessor:
             logger.error(f"❌ Vision extraction failed: {e}")
             return None
 
-    # Update your _extract_pdf_content method in tools/pdf_processor.py
-
     def _extract_pdf_content(self, pdf_path: Path) -> str:
         """Main extraction orchestrator: Choose between hybrid, vision, or TOC-guided extraction."""
 
@@ -801,12 +799,33 @@ class EnhancedPDFProcessor:
                 logger.error("❌ Insufficient content extracted from all methods!")
                 return {}
 
+            # STAGE 2: TOC Extraction and Header Restructuring
+            if self.progress_callback:
+                self.progress_callback("toc_processing", 60, "Extracting TOC and restructuring headers...")
+
+            try:
+                # Extract TOC structure
+                toc_data = extract_nested_toc_from_pdf(str(pdf_path))
+
+                if toc_data and toc_data.get("structure"):
+                    logger.info(f"📚 TOC extracted: {pdf_name}")
+
+                    # Apply header restructuring
+                    header_fixer = NestedShadowrunHeaderFixer(nested_toc_dict=toc_data)
+                    full_text = header_fixer.fix_headers(full_text, pdf_name)
+                    logger.info(f"✅ Headers restructured: {pdf_name}")
+                else:
+                    logger.warning(f"⚠️ No TOC found, skipping header restructuring: {pdf_name}")
+
+            except Exception as e:
+                logger.warning(f"⚠️ TOC/Header processing failed, continuing: {e}")
+
             extraction_time = time.time() - processing_start
             logger.info(f"✅ Extraction completed in {extraction_time:.1f}s")
 
             # Save SINGLE markdown file (NO CHUNKING HERE)
             if self.progress_callback:
-                self.progress_callback("saving", 90, "Saving single markdown file for indexer chunking...")
+                self.progress_callback("saving", 85, "Saving single markdown file for indexer chunking...")
 
             saved_files = self._save_single_file(full_text, output_subdir, pdf_name)
 
@@ -818,7 +837,7 @@ class EnhancedPDFProcessor:
             logger.info(f"🎉 Successfully processed {pdf_name} in {total_time:.1f}s: 1 file created for indexer")
 
             if self.progress_callback:
-                self.progress_callback("complete", 95,
+                self.progress_callback("complete", 90,
                                        f"Enhanced processing complete! Created 1 file in {total_time:.1f}s - File will now be preprocessed for cleanup")
 
             regex_cleaner = create_regex_cleaner()
