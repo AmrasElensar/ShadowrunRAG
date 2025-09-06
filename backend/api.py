@@ -1240,7 +1240,7 @@ async def debug_context_real(
         n_results=5,
         where_filter=enhanced_filter,
         character_role=character_role,
-        fetch_linked=False
+        fetch_linked=True
     )
 
     if not search_results['documents']:
@@ -1383,7 +1383,7 @@ async def debug_retrieval(request: dict):
                 "content_type": meta.get('content_type', 'unknown'),
                 "contains_rules": meta.get('is_rule_definition', False),
                 "word_count": len(doc.split()),
-                "preview": doc[:200] + "..." if len(doc) > 200 else doc
+                "preview": doc
             })
 
         return response
