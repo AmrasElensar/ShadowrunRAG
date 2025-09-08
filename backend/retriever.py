@@ -86,7 +86,7 @@ class Retriever:
             "num_gpu": int(os.getenv("MODEL_NUM_GPU", 99)),
             "num_thread": int(os.getenv("MODEL_NUM_THREAD", 12)),
             "repeat_penalty": float(os.getenv("MODEL_REPEAT_PENALTY", 1.05)),
-            "num_ctx": int(os.getenv("MODEL_NUM_CTX", 4096)),
+            "num_ctx": int(os.getenv("MODEL_NUM_CTX", 8192)),
             "num_batch": int(os.getenv("MODEL_NUM_BATCH", 128)),
         }
 
@@ -538,7 +538,8 @@ class Retriever:
         character_stats: Optional[str] = None,
         edition: Optional[str] = "SR5",  # Default to SR5
         model: Optional[str] = None,
-        fetch_linked_chunks: bool = True
+        fetch_linked_chunks: bool = True,
+        conversation_context: Optional[str] = None
     ) -> Dict:
         """Enhanced RAG pipeline with improved filtering and context building."""
 
@@ -562,7 +563,12 @@ class Retriever:
             }
 
         # Build enhanced context with metadata
-        context = self.build_enhanced_context(search_results)
+        search_context = self.build_enhanced_context(search_results)
+
+        if conversation_context:
+            full_context = f"CONVERSATION HISTORY:\n{conversation_context}\n\nCURRENT CONTEXT:\n{search_context}"
+        else:
+            full_context = search_context
 
         # Build enhanced prompt with character role info
         if PROMPT_AVAILABLE:
@@ -576,10 +582,10 @@ class Retriever:
             prompt_template = get_prompt()
 
         try:
-            prompt = prompt_template.format(context=context, question=question)
+            prompt = prompt_template.format(context=full_context, question=question)
         except Exception as e:
             logger.warning(f"Prompt formatting failed: {e}")
-            prompt = f"{prompt_template}\n\nContext:\n{context}\n\nQuestion:\n{question}"
+            prompt = f"{prompt_template}\n\nContext:\n{full_context}\n\nQuestion:\n{question}"
 
         # Generate answer with enhanced options
         answer = self.generate_answer(
@@ -623,7 +629,8 @@ class Retriever:
             character_stats: Optional[str] = None,
             edition: Optional[str] = "SR5",  # Default to SR5
             model: Optional[str] = None,
-            fetch_linked_chunks: bool = True
+            fetch_linked_chunks: bool = True,
+            conversation_context: Optional[str] = None
     ):
         """Enhanced streaming query with complete filter logic and linked chunk fetching."""
 
@@ -644,7 +651,12 @@ class Retriever:
             return
 
         # Build enhanced context with sequence information
-        context = self.build_enhanced_context_with_sequence(search_results)
+        search_context = self.build_enhanced_context_with_sequence(search_results)
+
+        if conversation_context:
+            full_context = f"CONVERSATION HISTORY:\n{conversation_context}\n\nCURRENT CONTEXT:\n{search_context}"
+        else:
+            full_context = search_context
 
         # Build enhanced prompt
         if PROMPT_AVAILABLE:
@@ -658,10 +670,10 @@ class Retriever:
             prompt_template = get_prompt()
 
         try:
-            prompt = prompt_template.format(context=context, question=question)
+            prompt = prompt_template.format(context=full_context, question=question)
         except Exception as e:
             logger.warning(f"Prompt formatting failed: {e}")
-            prompt = f"{prompt_template}\n\nContext:\n{context}\n\nQuestion:\n{question}"
+            prompt = f"{prompt_template}\n\nContext:\n{full_context}\n\nQuestion:\n{question}"
 
         # Stream enhanced answer
         for token in self.generate_answer_stream(

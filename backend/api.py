@@ -115,6 +115,7 @@ class QueryRequest(BaseModel):
     character_stats: Optional[str] = None
     edition: Optional[str] = "SR5"              # Default to SR5
     model: Optional[str] = None
+    conversation_context: Optional[str]
 
 class IndexRequest(BaseModel):
     directory: str = "data/processed_markdown"
@@ -411,7 +412,8 @@ async def query_stream(request: QueryRequest):
                         character_role=request.character_role,
                         character_stats=request.character_stats,
                         edition=edition_to_use,
-                        model=request.model
+                        model=request.model,
+                        conversation_context=request.conversation_context
                 ):
                     # Detect thinking tags
                     if "<think>" in token:

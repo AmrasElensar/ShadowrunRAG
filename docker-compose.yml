@@ -51,7 +51,7 @@ services:
       - MODEL_TOP_K=40                     
       - MODEL_TOP_P=0.9
       - MODEL_REPEAT_PENALTY=1.05
-      - MODEL_NUM_CTX=6144                 # Full context window
+      - MODEL_NUM_CTX=8192
       - MODEL_NUM_BATCH=128                # Larger batch for speed
       
       # Embedding model will auto-load/unload as needed

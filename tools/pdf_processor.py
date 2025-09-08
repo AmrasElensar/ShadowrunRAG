@@ -211,7 +211,6 @@ class EnhancedPDFProcessor:
             marker_config = {
                 'ollama_base_url': 'http://ollama:11434',
                 'ollama_model': 'llama3.1:8b',
-                #'ollama_args': 'num_ctx 16384',
                 'force_ocr': False,  # Force OCR for complex layouts
                 'use_llm': False,  # Enable LLM post-processing
                 'debug': True,
