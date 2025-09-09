@@ -43,7 +43,7 @@ class RAGClient:
     def get_job_status(self, job_id: str) -> Dict:
         """Poll job status."""
         try:
-            response = requests.get(f"{self.api_url}/job/{job_id}", timeout=5)
+            response = requests.get(f"{self.api_url}/job/{job_id}", timeout=10)
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -216,7 +216,7 @@ class RAGClient:
             response = requests.post(
                 f"{self.api_url}/index",
                 json={"force_reindex": force},
-                timeout=300
+                timeout=3000
             )
             response.raise_for_status()
             return response.json()

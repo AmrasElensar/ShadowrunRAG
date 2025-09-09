@@ -375,30 +375,37 @@ class Retriever:
         return primary_results
 
     def _fetch_chunks_by_ids(self, chunk_ids: set) -> Dict:
-        """Fetch specific chunks by their chunk_id metadata."""
+        """FIXED: Fetch specific chunks by their actual ChromaDB IDs."""
         try:
-            # Use ChromaDB where filter to find chunks by chunk_id
-            # ✅ FIXED: Remove 'distances' from include - .get() doesn't support it
+            if not chunk_ids:
+                return {"documents": [], "metadatas": [], "distances": []}
+
+            # Convert set to list for ChromaDB
+            id_list = list(chunk_ids)
+
+            # FIXED: Use ChromaDB's direct ID lookup instead of metadata search
+            # The issue was that we were searching for "chunk_id" in metadata,
+            # but ChromaDB stores the actual IDs separately from metadata
             results = self.collection.get(
-                where={
-                    "chunk_id": {"$in": list(chunk_ids)}
-                },
-                include=['documents', 'metadatas']  # Only documents and metadatas
+                ids=id_list,  # Direct ID lookup
+                include=['documents', 'metadatas']
             )
 
             # Convert to search result format
             if results and results.get('documents'):
+                logger.info(f"Successfully fetched {len(results['documents'])} linked chunks")
                 return {
                     "documents": results['documents'],
                     "metadatas": results['metadatas'],
                     "distances": [0.0] * len(results['documents'])  # Linked chunks get perfect relevance
                 }
             else:
-                logger.warning(f"Could not fetch linked chunks: {chunk_ids}")
+                logger.info(f"No linked chunks found for IDs: {chunk_ids}")
                 return {"documents": [], "metadatas": [], "distances": []}
 
         except Exception as e:
             logger.error(f"Error fetching linked chunks: {e}")
+            logger.debug(f"Failed chunk IDs: {chunk_ids}")
             return {"documents": [], "metadatas": [], "distances": []}
 
     def _merge_search_results(self, primary: Dict, linked: Dict) -> Dict:

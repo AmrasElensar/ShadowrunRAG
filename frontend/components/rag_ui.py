@@ -1,18 +1,15 @@
 """
 RAG Query UI Components for Shadowrun RAG System
-Clean extraction of query interface with character integration.
+Fixed version with correct Gradio event handling and output formats.
 """
-
 
 import gradio as gr
 import logging
 from typing import Dict
-from pathlib import Path
 from frontend.api_clients.character_client import CharacterAPIClient
 from frontend.ui_helpers.ui_helpers import format_dice_result, create_info_message, UIErrorHandler
 
 logger = logging.getLogger(__name__)
-
 
 class RAGQueryUI:
     """RAG query interface with character integration."""
@@ -30,19 +27,22 @@ class RAGQueryUI:
         """Build the main query interface components."""
         components = {}
 
-        conversation_history = gr.State([])  # List of [user_msg, bot_msg] pairs
+        # CRITICAL: Define conversation_history as a state component
+        conversation_history = gr.State([])
 
         with gr.Row():
             with gr.Column(scale=3):
                 # Query input area
                 components.update(self._build_query_input_section())
-
                 # Answer and thinking area
                 components.update(self._build_output_section())
 
             with gr.Column(scale=1):
                 # Configuration and character integration
                 components.update(self._build_configuration_section())
+
+        # Add conversation_history to components so event handlers can access it
+        components["conversation_history"] = conversation_history
 
         return components
 
@@ -76,7 +76,7 @@ class RAGQueryUI:
             visible=True
         )
 
-        # Conversation history display
+        # Conversation history display - CRITICAL: Must receive list of [user, bot] pairs
         conversation_display = gr.Chatbot(
             label="💬 Conversation History",
             height=400,
@@ -117,95 +117,63 @@ class RAGQueryUI:
 
     def _build_configuration_section(self):
         """Build configuration section with character integration."""
-        with gr.Column():
-            gr.Markdown("### ⚙️ Enhanced Configuration")
+        # Model selection
+        model_select = gr.Dropdown(
+            choices=["llama3:8b-instruct-q4_K_M"],
+            value="llama3:8b-instruct-q4_K_M",
+            label="🧠 Model"
+        )
 
-            # Model selection
-            model_select = gr.Dropdown(
-                choices=self.rag_client.get_models() or ["llama3:8b-instruct-q4_K_M"],
-                value="llama3:8b-instruct-q4_K_M",
-                label="LLM Model",
-                allow_custom_value=True
-            )
+        refresh_models_btn = gr.Button("🔄 Refresh Models", size="sm")
 
-            refresh_models_btn = gr.Button("🔄 Refresh models", size="sm")
+        # Basic query parameters
+        n_results_slider = gr.Slider(
+            minimum=1, maximum=20, value=5, step=1,
+            label="📄 Number of Results"
+        )
 
-            # Results configuration
-            n_results_slider = gr.Slider(
-                minimum=1, maximum=10, value=5, step=1,
-                label="Number of Sources"
-            )
+        query_type_select = gr.Dropdown(
+            choices=["general", "specific", "technical", "rules", "character"],
+            value="general",
+            label="🎯 Query Type"
+        )
 
-            query_type_select = gr.Dropdown(
-                choices=["General", "Rules", "Session"],
-                value="General",
-                label="Query Type"
-            )
+        edition_select = gr.Dropdown(
+            choices=["SR5", "SR6", "SR4", "SR3"],
+            value="SR5",
+            label="📚 Edition"
+        )
 
-            # Character context integration
-            character_components = self._build_character_context_section()
-
-            # Enhanced filters
-            filter_components = self._build_filter_section()
-
-            return {
-                "model_select": model_select,
-                "refresh_models_btn": refresh_models_btn,
-                "n_results_slider": n_results_slider,
-                "query_type_select": query_type_select,
-                **character_components,
-                **filter_components
-            }
-
-    def _build_character_context_section(self):
-        """Build character context section for queries."""
-        with gr.Accordion("👤 Character Context", open=True):
-            character_role_select = gr.Dropdown(
-                choices=["None", "Decker", "Mage", "Street Samurai",
-                         "Rigger", "Adept", "Technomancer", "Face"],
-                value="None",
-                label="Character Role (overrides section filter)"
-            )
-
-            character_stats_input = gr.Textbox(
-                label="Character Stats",
-                placeholder="e.g., Logic 6, Hacking 5"
-            )
-
-            edition_select = gr.Dropdown(
-                choices=["SR5", "SR6", "SR4", "SR3", "None"],
-                value="SR5",
-                label="Preferred Edition"
-            )
-
-            # Active character selector
+        # Character integration
+        with gr.Accordion("🎭 Character Integration", open=True):
             character_query_selector = gr.Dropdown(
-                label="Active Character",
                 choices=["None"],
                 value="None",
-                info="Select character for context-aware queries"
-            )
-
-            character_context_display = gr.Textbox(
-                label="Character Status",
-                value="No character selected",
-                interactive=False,
-                lines=2
+                label="Active Character",
+                interactive=True
             )
 
             refresh_char_btn = gr.Button("🔄 Refresh Characters", size="sm")
 
-        return {
-            "character_role_select": character_role_select,
-            "character_stats_input": character_stats_input,
-            "edition_select": edition_select,
-            "character_query_selector": character_query_selector,
-            "character_context_display": character_context_display,
-            "refresh_char_btn": refresh_char_btn
-        }
+            character_context_display = gr.Textbox(
+                label="Character Context",
+                lines=2,
+                interactive=False
+            )
 
-    def _build_filter_section(self):
-        """Build enhanced filter section."""
+            character_role_select = gr.Dropdown(
+                choices=["None", "Street Samurai", "Decker", "Mage", "Adept",
+                        "Rigger", "Face", "Technomancer"],
+                value="None",
+                label="Character Role"
+            )
+
+            character_stats_input = gr.Textbox(
+                label="Character Stats",
+                placeholder="e.g., Body 5, Agility 6, Firearms 8"
+            )
+
+        # Enhanced filters
         with gr.Accordion("🔍 Enhanced Filters", open=False):
             gr.Markdown("*Character role selection overrides section filter*")
 
@@ -234,15 +202,24 @@ class RAGQueryUI:
             )
 
         return {
+            "model_select": model_select,
+            "refresh_models_btn": refresh_models_btn,
+            "n_results_slider": n_results_slider,
+            "query_type_select": query_type_select,
+            "edition_select": edition_select,
+            "character_query_selector": character_query_selector,
+            "refresh_char_btn": refresh_char_btn,
+            "character_context_display": character_context_display,
+            "character_role_select": character_role_select,
+            "character_stats_input": character_stats_input,
             "section_filter": section_filter,
             "subsection_filter": subsection_filter,
             "document_type_filter": document_type_filter,
             "edition_filter": edition_filter
         }
 
-
 class RAGQueryHandlers:
-    """Event handlers for RAG query operations."""
+    """Event handlers for RAG query operations with fixed output formats."""
 
     def __init__(self, rag_client, char_api: CharacterAPIClient):
         self.rag_client = rag_client
@@ -253,11 +230,12 @@ class RAGQueryHandlers:
                      filter_section: str, filter_subsection: str, filter_document_type: str,
                      filter_edition: str, character_selector: str = "None",
                      is_follow_up: bool = False):
-        """Enhanced existing submit_query with conversation support."""
+        """FIXED: Submit query with correct Gradio output format."""
 
         if not question:
             current_conversation = conversation_history or []
-            yield current_conversation, "", "", "", [], gr.update(visible=False)
+            # Return 6 outputs to match event handler expectations
+            yield current_conversation, "", "", "", "", gr.update(visible=False)
             return
 
         # Build conversation context if this is a follow-up
@@ -285,8 +263,7 @@ class RAGQueryHandlers:
 
                     # Update conversation and return with correct format (6 outputs)
                     updated_conversation = conversation_history + [[question, answer]]
-                    yield updated_conversation, "", f"**Character:** {active_char['name']}", "", [], gr.update(
-                        visible=False)
+                    yield updated_conversation, "", f"**Character:** {active_char['name']}", "", "", gr.update(visible=False)
                     return
 
         except Exception as e:
@@ -329,76 +306,61 @@ class RAGQueryHandlers:
                         params["character_context"] = character_context
                         logger.info(f"Added character context: {character_context}")
         except Exception as e:
-            logger.warning(f"Failed to get character context: {e}")
-            # Continue without character context
+            logger.warning(f"Character context addition failed: {e}")
 
-        # Stream response with thinking support - FIXED STREAMING LOGIC
+        # Stream the response
         try:
-            # Initialize streaming state
             current_answer = ""
             current_thinking = ""
             thinking_visible = False
 
-            for response, thinking, metadata, status in self.rag_client.query_stream(question, **params):
-                if status == "error":
-                    yield conversation_history, response, "", "", [], gr.update(visible=False)
-                    return
-
-                # Update current content
+            for response, thinking_content, metadata, status in self.rag_client.query_stream(question, **params):
                 current_answer = response
-                current_thinking = thinking
+                current_thinking = thinking_content or ""
 
-                # Check if we have thinking content
-                has_thinking = bool(thinking and thinking.strip())
-                if has_thinking and not thinking_visible:
+                # Update thinking visibility
+                if thinking_content and thinking_content.strip():
                     thinking_visible = True
 
-                if status == "complete" and metadata:
-                    # Format sources
+                # Check if this is the final response (has metadata)
+                if metadata and status == "complete":
+                    # Process final metadata
                     sources_text = ""
                     if metadata.get("sources"):
-                        sources_list = [Path(s).name for s in metadata["sources"]]
-                        sources_text = "**Sources:**\n" + "\n".join([f"📄 {s}" for s in sources_list])
+                        sources_text = f"**Sources:** {', '.join(metadata['sources'])}"
 
-                    # Add character info to sources if used
-                    try:
-                        if active_char and params.get("character_context"):
-                            sources_text += f"\n\n**Character:** {active_char['name']} ({active_char['metatype']})"
-                    except:
-                        pass
-
-                    # Show applied filters for debugging
                     if metadata.get("applied_filters"):
                         filters_text = f"\n\n**Applied Filters:** {metadata['applied_filters']}"
                         sources_text += filters_text
 
-                    # Create chunks dataframe
-                    chunks_data = []
+                    # Create chunks data
+                    chunks_text = ""
                     if metadata.get("chunks"):
+                        chunk_summaries = []
                         for i, (chunk, dist) in enumerate(zip(
                                 metadata.get("chunks", []),
                                 metadata.get("distances", [])
                         )):
                             relevance = f"{(1 - dist):.2%}" if dist else "N/A"
                             content = chunk[:200] + "..." if len(chunk) > 200 else chunk
-                            chunks_data.append([relevance, content])
+                            chunk_summaries.append(f"**Chunk {i+1}** (Relevance: {relevance}):\n{content}")
+                        chunks_text = "\n\n".join(chunk_summaries)
 
-                    # Final yield with complete data
+                    # Final yield with complete data - FIXED: 6 outputs
                     updated_conversation = conversation_history + [[question, current_answer]]
-                    yield updated_conversation, "", current_thinking, sources_text, chunks_data, gr.update(
-                        visible=thinking_visible)
+                    yield updated_conversation, "", current_thinking, sources_text, chunks_text, gr.update(visible=thinking_visible)
 
                 else:
-                    # Intermediate yield for smooth streaming
+                    # Intermediate yield for smooth streaming - FIXED: 6 outputs
                     cursor = "▌" if status == "generating" else "🤔" if status == "thinking" else ""
                     display_answer = current_answer + cursor
 
-                    yield conversation_history, display_answer, current_thinking, "", [], gr.update(
-                        visible=thinking_visible)
+                    yield conversation_history, display_answer, current_thinking, "", "", gr.update(visible=thinking_visible)
 
         except Exception as e:
             error_msg = UIErrorHandler.handle_exception(e, "query submission")
-            yield conversation_history, error_msg, "", "", [], gr.update(visible=False)
+            # FIXED: 6 outputs
+            yield conversation_history, error_msg, "", "", "", gr.update(visible=False)
 
     def get_character_selector_choices(self):
         """Get character choices for query tab dropdown."""
@@ -478,7 +440,7 @@ class RAGQueryHandlers:
             yield result
 
     def new_chat(self):
-        """Reset conversation."""
+        """Reset conversation - FIXED: Return 5 outputs."""
         return [], "", "", "", gr.update(value="")
 
     def _build_conversation_context(self, conversation_history):
@@ -509,13 +471,33 @@ class RAGQueryHandlers:
 
 
 def wire_query_events(components: Dict, handlers: RAGQueryHandlers):
-    """Wire up RAG query event handlers."""
+    """FIXED: Wire up RAG query event handlers with correct input/output matching."""
 
-    # Query submission
+    # Character selection refresh
+    components["refresh_char_btn"].click(
+        fn=handlers.get_character_selector_choices,
+        outputs=[components["character_query_selector"]]
+    )
+
+    # Character selection change
+    components["character_query_selector"].change(
+        fn=handlers.handle_character_selection_for_query,
+        inputs=[components["character_query_selector"]],
+        outputs=[components["character_context_display"]]
+    )
+
+    # Model refresh
+    components["refresh_models_btn"].click(
+        fn=handlers.refresh_models,
+        outputs=[components["model_select"]]
+    )
+
+    # FIXED: New query (resets conversation) - 6 outputs
     components["submit_btn"].click(
-        fn=handlers.submit_query,
+        fn=handlers.submit_new_query,
         inputs=[
             components["question_input"],
+            components["conversation_history"],  # CRITICAL: Include conversation state
             components["model_select"],
             components["n_results_slider"],
             components["query_type_select"],
@@ -534,59 +516,16 @@ def wire_query_events(components: Dict, handlers: RAGQueryHandlers):
             components["thinking_output"],
             components["sources_output"],
             components["chunks_output"],
-            components["thinking_output"]
+            components["thinking_output"]  # Visibility update for thinking
         ]
     )
 
-    # Character selection refresh
-    components["refresh_char_btn"].click(
-        fn=handlers.get_character_selector_choices,
-        outputs=[components["character_query_selector"]]
-    )
-
-    # Character selection change
-    components["character_query_selector"].change(
-        fn=handlers.handle_character_selection_for_query,
-        inputs=[components["character_query_selector"]],
-        outputs=[components["character_context_display"]]
-    )
-
-    components["refresh_models_btn"].click(
-        fn=handlers.refresh_models,
-        outputs=[components["model_select"]]
-    )
-
-    # New query (resets conversation)
-    components["submit_btn"].click(
-        fn=handlers.submit_new_query,
-        inputs=[
-            components["question_input"],
-            components["model_select"],
-            components["n_results_slider"],
-            components["query_type_select"],
-            components["character_role_select"],
-            components["character_stats_input"],
-            components["edition_select"],
-            components["section_filter"],
-            components["subsection_filter"],
-            components["document_type_filter"],
-            components["edition_filter"],
-            components["character_query_selector"]
-        ],
-        outputs=[
-            components["conversation_display"],
-            components["thinking_output"],
-            components["sources_output"],
-            components["chunks_output"],
-            components["question_input"]  # Clear input
-        ]
-    )
-
-    # Follow-up query (continues conversation)
+    # FIXED: Follow-up query (continues conversation) - 6 outputs
     components["continue_btn"].click(
         fn=handlers.submit_follow_up,
         inputs=[
             components["question_input"],
+            components["conversation_history"],  # CRITICAL: Include conversation state
             components["model_select"],
             components["n_results_slider"],
             components["query_type_select"],
@@ -601,22 +540,23 @@ def wire_query_events(components: Dict, handlers: RAGQueryHandlers):
         ],
         outputs=[
             components["conversation_display"],
+            components["current_answer"],
             components["thinking_output"],
             components["sources_output"],
             components["chunks_output"],
-            components["question_input"]  # Clear input
+            components["thinking_output"]  # Visibility update for thinking
         ]
     )
 
-    # New chat button
+    # FIXED: New chat button - 5 outputs
     components["new_chat_btn"].click(
         fn=handlers.new_chat,
         outputs=[
             components["conversation_display"],
+            components["current_answer"],
             components["thinking_output"],
             components["sources_output"],
-            components["chunks_output"],
-            components["question_input"]
+            components["question_input"]  # Clear input
         ]
     )
 

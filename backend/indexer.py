@@ -153,7 +153,7 @@ class IncrementalIndexer:
         return embeddings
 
     def index_directory(self, directory: str, force_reindex: bool = False):
-        """Index all markdown files in a directory with enhanced metadata support."""
+        """FIXED: Index all markdown files with consistent chunk ID handling."""
         directory = Path(directory)
         md_files = list(directory.rglob("*.md"))
 
@@ -183,19 +183,54 @@ class IncrementalIndexer:
             texts = [chunk['text'] for chunk in all_chunks]
             embeddings = self._get_embeddings(texts)
 
-            ids = [f"{hashlib.md5(chunk['text'].encode()).hexdigest()[:16]}" for chunk in all_chunks]
-            metadatas = [chunk['metadata'] for chunk in all_chunks]
+            # FIXED: Use the chunk IDs from the chunker instead of creating new ones
+            # This ensures linking metadata matches actual ChromaDB IDs
+            ids = []
+            chunk_id_mapping = {}  # Map old chunk IDs to new ones for collision handling
 
-            # Avoid ID collisions (existing code)
+            for chunk in all_chunks:
+                original_id = chunk['id']  # From chunker: "source_section_X_chunk_Y"
+                chunk_id_mapping[original_id] = original_id
+                ids.append(original_id)
+
+            # Handle ID collisions by modifying IDs and updating all references
             seen_ids = set()
-            for i, id_ in enumerate(ids):
-                original = id_
+            for i, original_id in enumerate(ids):
+                new_id = original_id
                 counter = 1
-                while id_ in seen_ids:
-                    id_ = f"{original}_{counter}"
+                while new_id in seen_ids:
+                    new_id = f"{original_id}_{counter}"
                     counter += 1
-                ids[i] = id_
-                seen_ids.add(id_)
+
+                if new_id != original_id:
+                    # Update the mapping and all references in metadata
+                    chunk_id_mapping[original_id] = new_id
+                    ids[i] = new_id
+
+                seen_ids.add(new_id)
+
+            # Update all linking references in metadata to use the final IDs
+            metadatas = []
+            for chunk in all_chunks:
+                metadata = chunk['metadata'].copy()
+
+                # Update link references to use final IDs
+                for link_field in ['next_chunk_global', 'prev_chunk_global', 'next_chunk_section',
+                                   'prev_chunk_section']:
+                    if metadata.get(link_field) and metadata[link_field] in chunk_id_mapping:
+                        metadata[link_field] = chunk_id_mapping[metadata[link_field]]
+
+                # Update section chunk IDs list
+                if metadata.get('section_chunk_ids'):
+                    updated_section_ids = []
+                    for section_id in metadata['section_chunk_ids']:
+                        if section_id in chunk_id_mapping:
+                            updated_section_ids.append(chunk_id_mapping[section_id])
+                        else:
+                            updated_section_ids.append(section_id)
+                    metadata['section_chunk_ids'] = updated_section_ids
+
+                metadatas.append(metadata)
 
             cleaned_metadatas = self._clean_metadata_for_chromadb(metadatas)
 
@@ -203,15 +238,16 @@ class IncrementalIndexer:
                 ids=ids,
                 embeddings=embeddings,
                 documents=texts,
-                metadatas=cleaned_metadatas  # ✅ No None values
+                metadatas=cleaned_metadatas
             )
 
-            logger.info(f"Added {len(all_chunks)} chunks to index with enhanced sequential metadata")
+            logger.info(f"Added {len(all_chunks)} chunks to index with consistent chunk IDs")
+            logger.info(f"ID collisions resolved: {len([k for k, v in chunk_id_mapping.items() if k != v])}")
 
-            # Enhanced metadata distribution logging
+            # Enhanced metadata distribution logging (existing code continues...)
             doc_types = {}
             editions = {}
-            sections = {}  # This will now be multi-label
+            sections = {}
             primary_sections = {}
             content_types = {}
             chunk_links = 0
@@ -225,7 +261,7 @@ class IncrementalIndexer:
                 edition = meta.get('edition', 'unknown')
                 editions[edition] = editions.get(edition, 0) + 1
 
-                # Multi-label sections (NEW)
+                # Multi-label sections
                 sections_list = meta.get('sections', [])
                 if isinstance(sections_list, str):
                     sections_list = sections_list.split(',')
@@ -238,7 +274,7 @@ class IncrementalIndexer:
                 primary = meta.get('primary_section', 'General')
                 primary_sections[primary] = primary_sections.get(primary, 0) + 1
 
-                # Content types (NEW)
+                # Content types
                 content_type = meta.get('content_type', 'general')
                 content_types[content_type] = content_types.get(content_type, 0) + 1
 
@@ -249,13 +285,12 @@ class IncrementalIndexer:
             logger.info(f"Document types: {doc_types}")
             logger.info(f"Editions: {editions}")
             logger.info(f"Primary sections: {primary_sections}")
-            logger.info(f"All sections (multi-label): {dict(list(sections.items())[:10])}")  # Show top 10
+            logger.info(f"All sections (multi-label): {dict(list(sections.items())[:10])}")
             logger.info(f"Content types: {content_types}")
             logger.info(f"Chunks with sequential links: {chunk_links}/{len(metadatas)}")
 
             # Log classification quality metrics
             unique_sections = len(sections)
-            total_classifications = sum(sections.values())
             classification_diversity = unique_sections / len(metadatas) * 100 if metadatas else 0
 
             logger.info(

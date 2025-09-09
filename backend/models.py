@@ -106,6 +106,30 @@ class ProgramAddRequest(BaseModel):
     program_type: str = "common"
     description: str = ""
 
+# ===== RAG REQUEST MODELS =====
+
+class QueryRequest(BaseModel):
+    """Request model for RAG queries."""
+    question: str
+    n_results: int = 5
+    query_type: str = "general"
+    filter_source: Optional[str] = None
+    filter_section: Optional[str] = None
+    filter_subsection: Optional[str] = None
+    filter_document_type: Optional[str] = None
+    filter_edition: Optional[str] = None
+    character_role: Optional[str] = None
+    character_stats: Optional[str] = None
+    edition: Optional[str] = "SR5"
+    model: Optional[str] = None
+    conversation_context: Optional[str] = None
+
+class IndexRequest(BaseModel):
+    """Request model for indexing operations."""
+    directory: str = "data/processed_markdown"
+    force_reindex: bool = False
+
+# ===== RESPONSE MODELS =====
 
 class HealthCheckResponse(BaseModel):
     """Response for root health check endpoint."""
@@ -114,7 +138,6 @@ class HealthCheckResponse(BaseModel):
     active_jobs: Optional[int] = Field(None, description="Number of active processing jobs")
     tracking_method: Optional[str] = Field(None, description="Progress tracking method used")
 
-
 class UploadResponse(BaseModel):
     """Response for PDF upload endpoint."""
     job_id: str = Field(..., description="Unique job identifier")
@@ -122,7 +145,6 @@ class UploadResponse(BaseModel):
     status: str = Field(..., description="Upload status")
     message: str = Field(..., description="Human-readable status message")
     poll_url: Optional[str] = Field(None, description="URL to poll for job status")
-
 
 class JobStatusResponse(BaseModel):
     """Response for job status polling."""
@@ -133,7 +155,6 @@ class JobStatusResponse(BaseModel):
     timestamp: Optional[float] = Field(None, description="Last update timestamp")
     status: Optional[str] = Field(None, description="Job status (for not found jobs)")
     message: Optional[str] = Field(None, description="Status message (for not found jobs)")
-
 
 class JobInfo(BaseModel):
     """Information about a single job."""
@@ -148,7 +169,6 @@ class JobsListResponse(BaseModel):
     active_jobs: Dict[str, JobInfo] = Field(..., description="Dictionary of active jobs")
     count: int = Field(..., description="Number of active jobs")
 
-
 class QueryResponse(BaseModel):
     """Response for RAG query endpoint."""
     answer: str = Field(..., description="Generated answer")
@@ -157,23 +177,19 @@ class QueryResponse(BaseModel):
     distances: List[float] = Field(..., description="Similarity distances for chunks")
     metadatas: List[Dict[str, Any]] = Field(..., description="Metadata for each chunk")
 
-
 class IndexResponse(BaseModel):
     """Response for indexing operations."""
     status: str = Field(..., description="Operation status")
     message: str = Field(..., description="Result message")
 
-
 class DocumentsResponse(BaseModel):
     """Response for document listing."""
     documents: List[str] = Field(..., description="List of indexed document paths")
-
 
 class ModelsResponse(BaseModel):
     """Response for available models."""
     models: List[str] = Field(..., description="List of available model names")
     error: Optional[str] = Field(None, description="Error message if model fetching failed")
-
 
 class SystemStatusResponse(BaseModel):
     """Response for system status endpoint."""

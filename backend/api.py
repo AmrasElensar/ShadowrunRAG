@@ -16,9 +16,10 @@ from .indexer import IncrementalIndexer
 from .retriever import Retriever
 from .models import (
     HealthCheckResponse, UploadResponse, JobStatusResponse, JobsListResponse, JobInfo,
-    QueryResponse, IndexResponse, DocumentsResponse, ModelsResponse, SystemStatusResponse, CharacterCreateRequest,
-    CharacterStatsUpdate, CharacterResourcesUpdate, SkillAddRequest, QualityAddRequest, GearAddRequest,
-    WeaponAddRequest, VehicleAddRequest, CyberdeckUpdate, ProgramAddRequest
+    QueryResponse, IndexResponse, DocumentsResponse, ModelsResponse, SystemStatusResponse,
+    CharacterCreateRequest, CharacterStatsUpdate, CharacterResourcesUpdate, SkillAddRequest,
+    QualityAddRequest, GearAddRequest, WeaponAddRequest, VehicleAddRequest, CyberdeckUpdate,
+    ProgramAddRequest, QueryRequest, IndexRequest
 )
 from tools.pdf_processor import PDFProcessor
 from backend.character_manager import get_character_manager
@@ -101,25 +102,6 @@ logger.info("🚀 Enhanced FastAPI app initialized with components:")
 logger.info(f"   - Enhanced PollingProgressTracker: ✅")
 logger.info(f"   - Enhanced IncrementalIndexer: ✅")
 logger.info(f"   - Enhanced Retriever: ✅")
-
-class QueryRequest(BaseModel):
-    question: str
-    n_results: int = 5
-    query_type: str = "general"
-    filter_source: Optional[str] = None
-    filter_section: Optional[str] = None
-    filter_subsection: Optional[str] = None
-    filter_document_type: Optional[str] = None  # New filter
-    filter_edition: Optional[str] = None        # New filter
-    character_role: Optional[str] = None
-    character_stats: Optional[str] = None
-    edition: Optional[str] = "SR5"              # Default to SR5
-    model: Optional[str] = None
-    conversation_context: Optional[str]
-
-class IndexRequest(BaseModel):
-    directory: str = "data/processed_markdown"
-    force_reindex: bool = False
 
 @app.get("/", response_model=HealthCheckResponse)
 def root():
