@@ -153,7 +153,7 @@ class IncrementalIndexer:
         return embeddings
 
     def index_directory(self, directory: str, force_reindex: bool = False):
-        """FIXED: Index all markdown files with consistent chunk ID handling."""
+        """Index all markdown files with semantic chunk IDs and proper file tracking."""
         directory = Path(directory)
         md_files = list(directory.rglob("*.md"))
 
@@ -171,7 +171,7 @@ class IncrementalIndexer:
             logger.info("No new or changed files to index")
             return
 
-        logger.info(f"Indexing {len(files_to_index)} files with enhanced sequential metadata...")
+        logger.info(f"Indexing {len(files_to_index)} files with semantic chunk IDs...")
         all_chunks = []
 
         for file_path in files_to_index:
@@ -183,54 +183,33 @@ class IncrementalIndexer:
             texts = [chunk['text'] for chunk in all_chunks]
             embeddings = self._get_embeddings(texts)
 
-            # FIXED: Use the chunk IDs from the chunker instead of creating new ones
-            # This ensures linking metadata matches actual ChromaDB IDs
-            ids = []
-            chunk_id_mapping = {}  # Map old chunk IDs to new ones for collision handling
+            # FIXED: Use semantic IDs from chunker instead of MD5 hashes
+            ids = [chunk['id'] for chunk in all_chunks]
+            metadatas = [chunk['metadata'] for chunk in all_chunks]
 
-            for chunk in all_chunks:
-                original_id = chunk['id']  # From chunker: "source_section_X_chunk_Y"
-                chunk_id_mapping[original_id] = original_id
-                ids.append(original_id)
-
-            # Handle ID collisions by modifying IDs and updating all references
+            # Handle ID collisions with semantic IDs
             seen_ids = set()
-            for i, original_id in enumerate(ids):
-                new_id = original_id
+            for i, id_ in enumerate(ids):
+                original = id_
                 counter = 1
-                while new_id in seen_ids:
-                    new_id = f"{original_id}_{counter}"
+                while id_ in seen_ids:
+                    id_ = f"{original}_{counter}"
                     counter += 1
+                ids[i] = id_
+                seen_ids.add(id_)
 
-                if new_id != original_id:
-                    # Update the mapping and all references in metadata
-                    chunk_id_mapping[original_id] = new_id
-                    ids[i] = new_id
+                # CRITICAL: Update linking metadata if ID was changed
+                if id_ != original:
+                    # Update this chunk's metadata links
+                    for link_field in ['next_chunk_global', 'prev_chunk_global']:
+                        if metadatas[i].get(link_field) == original:
+                            metadatas[i][link_field] = id_
 
-                seen_ids.add(new_id)
-
-            # Update all linking references in metadata to use the final IDs
-            metadatas = []
-            for chunk in all_chunks:
-                metadata = chunk['metadata'].copy()
-
-                # Update link references to use final IDs
-                for link_field in ['next_chunk_global', 'prev_chunk_global', 'next_chunk_section',
-                                   'prev_chunk_section']:
-                    if metadata.get(link_field) and metadata[link_field] in chunk_id_mapping:
-                        metadata[link_field] = chunk_id_mapping[metadata[link_field]]
-
-                # Update section chunk IDs list
-                if metadata.get('section_chunk_ids'):
-                    updated_section_ids = []
-                    for section_id in metadata['section_chunk_ids']:
-                        if section_id in chunk_id_mapping:
-                            updated_section_ids.append(chunk_id_mapping[section_id])
-                        else:
-                            updated_section_ids.append(section_id)
-                    metadata['section_chunk_ids'] = updated_section_ids
-
-                metadatas.append(metadata)
+                    # Update other chunks that reference this chunk
+                    for j, other_metadata in enumerate(metadatas):
+                        for link_field in ['next_chunk_global', 'prev_chunk_global']:
+                            if other_metadata.get(link_field) == original:
+                                other_metadata[link_field] = id_
 
             cleaned_metadatas = self._clean_metadata_for_chromadb(metadatas)
 
@@ -241,10 +220,9 @@ class IncrementalIndexer:
                 metadatas=cleaned_metadatas
             )
 
-            logger.info(f"Added {len(all_chunks)} chunks to index with consistent chunk IDs")
-            logger.info(f"ID collisions resolved: {len([k for k, v in chunk_id_mapping.items() if k != v])}")
+            logger.info(f"Added {len(all_chunks)} chunks with semantic IDs")
 
-            # Enhanced metadata distribution logging (existing code continues...)
+            # Log stats (existing logging code)
             doc_types = {}
             editions = {}
             sections = {}
@@ -253,15 +231,12 @@ class IncrementalIndexer:
             chunk_links = 0
 
             for meta in metadatas:
-                # Document types
                 doc_type = meta.get('document_type', 'unknown')
                 doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
 
-                # Editions
                 edition = meta.get('edition', 'unknown')
                 editions[edition] = editions.get(edition, 0) + 1
 
-                # Multi-label sections
                 sections_list = meta.get('sections', [])
                 if isinstance(sections_list, str):
                     sections_list = sections_list.split(',')
@@ -270,15 +245,12 @@ class IncrementalIndexer:
                     section = section.strip()
                     sections[section] = sections.get(section, 0) + 1
 
-                # Primary sections
                 primary = meta.get('primary_section', 'General')
                 primary_sections[primary] = primary_sections.get(primary, 0) + 1
 
-                # Content types
                 content_type = meta.get('content_type', 'general')
                 content_types[content_type] = content_types.get(content_type, 0) + 1
 
-                # Chunk links
                 if meta.get('next_chunk_global') or meta.get('prev_chunk_global'):
                     chunk_links += 1
 
@@ -289,22 +261,17 @@ class IncrementalIndexer:
             logger.info(f"Content types: {content_types}")
             logger.info(f"Chunks with sequential links: {chunk_links}/{len(metadatas)}")
 
-            # Log classification quality metrics
             unique_sections = len(sections)
             classification_diversity = unique_sections / len(metadatas) * 100 if metadatas else 0
 
             logger.info(
                 f"Classification diversity: {classification_diversity:.1f}% ({unique_sections} unique sections)")
 
-            # Log content type distribution
             rules_count = content_types.get('explicit_rule', 0)
             examples_count = content_types.get('example', 0)
-            tables_count = content_types.get('table_header', 0)
 
-            logger.info(
-                f"Content analysis: {rules_count} explicit rules, {examples_count} examples, {tables_count} tables")
+            logger.info(f"Content analysis: {rules_count} explicit rules, {examples_count} examples")
 
-            # Warn about classification issues
             if classification_diversity < 5:
                 logger.warning("⚠️ Low classification diversity - check classification patterns")
 

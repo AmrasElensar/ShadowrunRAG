@@ -184,14 +184,20 @@ class CleanSemanticChunker:
                 break
 
             old_pos = current_pos
-            overlap_start = max(0, chunk_end - self.overlap)
-            current_pos = overlap_start
-            logger.info(f"Position update: {old_pos} -> {current_pos}")
 
-            # Safety check to prevent infinite loops
-            if current_pos <= old_pos and chunk_end < len(content):
-                logger.error(f"Chunker stuck! Position not advancing: {old_pos} -> {current_pos}")
-                current_pos = old_pos + 200  # Force advancement
+            # FIXED: Calculate overlap but ENSURE minimum advancement
+            overlap_start = max(0, chunk_end - self.overlap)
+
+            # CRITICAL FIX: Guarantee forward progress
+            # Never go backwards, always advance at least a minimum amount
+            min_advance = 400  # Minimum characters to advance each iteration
+            current_pos = max(overlap_start, old_pos + min_advance)
+
+            # Additional safety: don't advance beyond content length
+            current_pos = min(current_pos, len(content))
+
+            logger.debug(
+                f"Position: {old_pos} -> {current_pos} (chunk_end: {chunk_end}, overlap_start: {overlap_start})")
 
             chunk_idx += 1
 

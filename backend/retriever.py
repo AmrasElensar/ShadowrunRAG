@@ -409,29 +409,27 @@ class Retriever:
             return {"documents": [], "metadatas": [], "distances": []}
 
     def _merge_search_results(self, primary: Dict, linked: Dict) -> Dict:
-        """Intelligently merge primary and linked search results."""
+        """FIXED: Intelligently merge primary and linked search results with semantic IDs."""
 
         # Start with primary results
         merged_docs = primary['documents'][:]
         merged_metas = primary['metadatas'][:]
         merged_distances = primary['distances'][:]
 
-        # Track which chunks we already have (avoid duplicates)
-        existing_chunk_ids = set()
-        for meta in merged_metas:
-            if meta and meta.get('chunk_id'):
-                existing_chunk_ids.add(meta['chunk_id'])
+        # FIXED: Since we don't have chunk IDs in metadata anymore with the indexer,
+        # we need to track which chunks we have by their position or content
+        existing_docs = set(primary['documents'])  # Track by document content to avoid exact duplicates
 
         # Add linked chunks that aren't already included
         for i, linked_doc in enumerate(linked['documents']):
             linked_meta = linked['metadatas'][i] if i < len(linked['metadatas']) else {}
-            linked_chunk_id = linked_meta.get('chunk_id')
 
-            if linked_chunk_id and linked_chunk_id not in existing_chunk_ids:
+            # FIXED: Check for duplicates by document content instead of metadata chunk_id
+            if linked_doc not in existing_docs:
                 merged_docs.append(linked_doc)
                 merged_metas.append(linked_meta)
-                merged_distances.append(linked['distances'][i] if i < len(linked['distances']) else 0.5)
-                existing_chunk_ids.add(linked_chunk_id)
+                merged_distances.append(linked['distances'][i] if i < len(linked['distances']) else 0.0)
+                existing_docs.add(linked_doc)
 
         # Sort by a combination of relevance and sequence
         merged_items = list(zip(merged_docs, merged_metas, merged_distances))

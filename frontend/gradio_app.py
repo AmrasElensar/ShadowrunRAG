@@ -144,6 +144,12 @@ class ShadowrunRAGApp:
             outputs=[self.rag_components["character_query_selector"]]
         )
 
+        # Auto-load models on app load
+        app.load(
+            fn=self.rag_handlers.refresh_models,
+            outputs=[self.rag_components["model_select"]]
+        )
+
         # Auto-load document library on app load
         app.load(
             fn=self.document_handlers.refresh_documents,
