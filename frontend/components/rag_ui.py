@@ -235,7 +235,16 @@ class RAGQueryHandlers:
         if not question:
             current_conversation = conversation_history or []
             # Return 6 outputs to match event handler expectations
-            yield current_conversation, "", "", "", "", gr.update(visible=False)
+            yield (
+                current_conversation,  # conversation_history (preserve state)
+                current_conversation,  # conversation_display (preserve state)
+                "",  # current_answer (empty)
+                "",  # thinking_output (empty)
+                "",  # sources_output (empty)
+                "",  # chunks_output (empty)
+                gr.update(visible=False),  # thinking_output visibility (hide)
+                gr.update()  # question_input (don't clear when empty)
+            )
             return
 
         # Build conversation context if this is a follow-up
@@ -263,7 +272,16 @@ class RAGQueryHandlers:
 
                     # Update conversation and return with correct format (6 outputs)
                     updated_conversation = conversation_history + [[question, answer]]
-                    yield updated_conversation, "", f"**Character:** {active_char['name']}", "", "", gr.update(visible=False)
+                    yield (
+                        updated_conversation,  # conversation_history (updated)
+                        updated_conversation,  # conversation_display (updated)
+                        "",  # current_answer (clear after dice roll)
+                        f"**Character:** {active_char['name']}",  # thinking_output (show character info)
+                        "",  # sources_output (empty for dice rolls)
+                        "",  # chunks_output (empty for dice rolls)
+                        gr.update(visible=False),  # thinking_output visibility (hide)
+                        gr.update(value="")  # question_input (clear after successful query)
+                    )
                     return
 
         except Exception as e:
@@ -348,19 +366,46 @@ class RAGQueryHandlers:
 
                     # Final yield with complete data - FIXED: 6 outputs
                     updated_conversation = conversation_history + [[question, current_answer]]
-                    yield updated_conversation, "", current_thinking, sources_text, chunks_text, gr.update(visible=thinking_visible)
+                    yield (
+                        updated_conversation,  # conversation_history
+                        updated_conversation,  # conversation_display
+                        "",  # current_answer (cleared)
+                        current_thinking,  # thinking_output
+                        sources_text,  # sources_output
+                        chunks_text,  # chunks_output
+                        gr.update(visible=thinking_visible),  # thinking_output visibility
+                        gr.update(value="")  # question_input (cleared)
+                    )
 
                 else:
                     # Intermediate yield for smooth streaming - FIXED: 6 outputs
                     cursor = "▌" if status == "generating" else "🤔" if status == "thinking" else ""
                     display_answer = current_answer + cursor
 
-                    yield conversation_history, display_answer, current_thinking, "", "", gr.update(visible=thinking_visible)
+                    yield (
+                        conversation_history,  # conversation_history (unchanged during streaming)
+                        conversation_history,  # conversation_display (unchanged during streaming)
+                        display_answer,  # current_answer (with cursor for streaming effect)
+                        current_thinking,  # thinking_output
+                        "",  # sources_output (empty during streaming)
+                        "",  # chunks_output (empty during streaming)
+                        gr.update(visible=thinking_visible),  # thinking_output visibility
+                        gr.update()  # question_input (no change during streaming)
+                    )
 
         except Exception as e:
             error_msg = UIErrorHandler.handle_exception(e, "query submission")
             # FIXED: 6 outputs
-            yield conversation_history, error_msg, "", "", "", gr.update(visible=False)
+            yield (
+                conversation_history,  # conversation_history (preserve state)
+                conversation_history,  # conversation_display (preserve state)
+                error_msg,  # current_answer (show error)
+                "",  # thinking_output (clear)
+                "",  # sources_output (clear)
+                "",  # chunks_output (clear)
+                gr.update(visible=False),  # thinking_output visibility (hide)
+                gr.update()  # question_input (don't clear on error)
+            )
 
     def get_character_selector_choices(self):
         """Get character choices for query tab dropdown."""
@@ -440,8 +485,15 @@ class RAGQueryHandlers:
             yield result
 
     def new_chat(self):
-        """Reset conversation - FIXED: Return 5 outputs."""
-        return [], "", "", "", gr.update(value="")
+        """Reset conversation - FIXED: Return 6 outputs."""
+        return (
+            [],  # conversation_history (reset to empty)
+            [],  # conversation_display (reset to empty)
+            "",  # current_answer (clear)
+            "",  # thinking_output (clear)
+            "",  # sources_output (clear)
+            gr.update(value="")  # question_input (clear)
+        )
 
     def _build_conversation_context(self, conversation_history):
         """Build conversation context for backend."""
@@ -471,7 +523,7 @@ class RAGQueryHandlers:
 
 
 def wire_query_events(components: Dict, handlers: RAGQueryHandlers):
-    """FIXED: Wire up RAG query event handlers with correct input/output matching."""
+    """FIXED: Wire up RAG query event handlers with conversation history persistence and input clearing."""
 
     # Character selection refresh
     components["refresh_char_btn"].click(
@@ -492,7 +544,7 @@ def wire_query_events(components: Dict, handlers: RAGQueryHandlers):
         outputs=[components["model_select"]]
     )
 
-    # FIXED: New query (resets conversation) - 6 outputs
+    # FIXED: New query (resets conversation) - 8 outputs including conversation_history + input clearing
     components["submit_btn"].click(
         fn=handlers.submit_new_query,
         inputs=[
@@ -511,16 +563,18 @@ def wire_query_events(components: Dict, handlers: RAGQueryHandlers):
             components["character_query_selector"]
         ],
         outputs=[
+            components["conversation_history"],    # CRITICAL: First output - updated conversation state
             components["conversation_display"],
             components["current_answer"],
             components["thinking_output"],
             components["sources_output"],
             components["chunks_output"],
-            components["thinking_output"]  # Visibility update for thinking
+            components["thinking_output"],         # Visibility update for thinking
+            components["question_input"]           # CRITICAL: Clear input after submit
         ]
     )
 
-    # FIXED: Follow-up query (continues conversation) - 6 outputs
+    # FIXED: Follow-up query (continues conversation) - 8 outputs including conversation_history + input clearing
     components["continue_btn"].click(
         fn=handlers.submit_follow_up,
         inputs=[
@@ -539,24 +593,27 @@ def wire_query_events(components: Dict, handlers: RAGQueryHandlers):
             components["character_query_selector"]
         ],
         outputs=[
+            components["conversation_history"],    # CRITICAL: First output - updated conversation state
             components["conversation_display"],
             components["current_answer"],
             components["thinking_output"],
             components["sources_output"],
             components["chunks_output"],
-            components["thinking_output"]  # Visibility update for thinking
+            components["thinking_output"],         # Visibility update for thinking
+            components["question_input"]           # CRITICAL: Clear input after follow-up
         ]
     )
 
-    # FIXED: New chat button - 5 outputs
+    # FIXED: New chat button - 6 outputs including conversation_history
     components["new_chat_btn"].click(
         fn=handlers.new_chat,
         outputs=[
+            components["conversation_history"],    # CRITICAL: Reset conversation state
             components["conversation_display"],
             components["current_answer"],
             components["thinking_output"],
             components["sources_output"],
-            components["question_input"]  # Clear input
+            components["question_input"]           # Clear input
         ]
     )
 
