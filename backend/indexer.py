@@ -9,6 +9,9 @@ from chromadb.config import Settings
 import ollama
 from tqdm import tqdm
 import logging
+from tools.llm_classifier import create_two_tier_classifier  # Updated
+from tools.improved_semantic_chunker import create_improved_semantic_chunker  # New
+from tools.enhanced_query_processor import create_enhanced_query_processor  # New
 
 # Check for optional dependencies
 try:

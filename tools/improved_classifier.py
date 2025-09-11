@@ -8,6 +8,7 @@ import logging
 import hashlib
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
+from tools.improved_semantic_chunker import create_improved_semantic_chunker
 
 logger = logging.getLogger(__name__)
 
