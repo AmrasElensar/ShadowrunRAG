@@ -9,6 +9,8 @@ import hashlib
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 from tools.improved_semantic_chunker import create_improved_semantic_chunker
+from tools.llm_classifier import create_two_tier_classifier
+from tools.regex_text_cleaner import create_regex_cleaner
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +21,7 @@ class CleanSemanticChunker:
     def __init__(self, chunk_size: int = 800, overlap: int = 150):
         self.chunk_size = chunk_size
         self.overlap = overlap
-
-        # Import existing components
-        from tools.llm_classifier import create_llm_classifier
-        from tools.regex_text_cleaner import create_regex_cleaner
-
-        self.classifier = create_llm_classifier(model_name="qwen2.5:14b-instruct-q6_K")
+        self.classifier = create_two_tier_classifier()
         self.regex_cleaner = create_regex_cleaner()
 
         logger.info(f"Clean semantic chunker initialized: {chunk_size} tokens, {overlap} overlap")
