@@ -1,6 +1,6 @@
 """
-Enhanced query processing system that improves retrieval targeting.
-This addresses the core issue where "Ares Predator gun" returned Matrix content.
+Fixed Enhanced query processing system that improves retrieval targeting.
+This fixes the implementation issues in the current version.
 """
 
 import re
@@ -26,58 +26,23 @@ class ShadowrunQueryProcessor:
     """Enhanced query processor for better content targeting."""
 
     def __init__(self):
-        # Weapon-related patterns
-        self.weapon_patterns = {
-            "manufacturers": {
-                "ares": ["ares", "ares macrotechnology", "ares arms"],
-                "colt": ["colt", "colt government", "colt america"],
-                "ruger": ["ruger", "ruger super warhawk"],
-                "browning": ["browning", "browning ultra-power"],
-                "remington": ["remington", "remington roomsweeper"],
-                "defiance": ["defiance"],
-                "yamaha": ["yamaha", "yamaha raiden"],
-                "fichetti": ["fichetti"],
-                "beretta": ["beretta"],
-                "steyr": ["steyr"],
-                "hk": ["hk", "heckler", "koch"]
-            },
-            "weapon_types": {
-                "pistols": ["pistol", "sidearm", "handgun", "heavy pistol", "light pistol"],
-                "rifles": ["rifle", "assault rifle", "sniper rifle", "hunting rifle"],
-                "shotguns": ["shotgun", "scattergun"],
-                "smgs": ["smg", "submachine gun", "machine pistol"],
-                "melee": ["sword", "blade", "knife", "katana", "club", "staff", "axe"]
-            },
-            "specific_weapons": {
-                "predator": ["predator", "ares predator", "predator v"],
-                "government": ["government 2066", "colt government"],
-                "ultra_power": ["ultra-power", "browning ultra-power"],
-                "roomsweeper": ["roomsweeper", "remington roomsweeper"],
-                "warhawk": ["warhawk", "super warhawk", "ruger super warhawk"],
-                "crusader": ["crusader", "ares crusader"],
-                "ak97": ["ak-97", "ak97", "kalashnikov"],
-                "alpha": ["ares alpha", "alpha assault rifle"]
-            },
-            "weapon_stats": ["accuracy", "damage", "ap", "armor penetration", "mode", "recoil", "ammo", "availability",
-                             "cost"]
-        }
+        # Import verified patterns
+        try:
+            from .verified_shadowrun_patterns import VERIFIED_SHADOWRUN_PATTERNS
+            self.patterns = VERIFIED_SHADOWRUN_PATTERNS
+        except ImportError:
+            logger.warning("Verified patterns not found, using basic patterns")
+            self.patterns = self._get_basic_patterns()
 
-        # Matrix-related patterns
-        self.matrix_patterns = {
-            "ic_types": ["black ic", "white ic", "gray ic", "killer ic", "marker ic", "patrol ic"],
-            "hacking_terms": ["hack", "matrix", "cyberdeck", "decker", "spider", "host"],
-            "matrix_attributes": ["firewall", "sleaze", "attack", "data processing"],
-            "matrix_actions": ["hack on the fly", "brute force", "data spike", "crash program"],
-            "matrix_damage": ["matrix damage", "biofeedback", "dumpshock", "link-lock"]
-        }
-
-        # Magic-related patterns
-        self.magic_patterns = {
-            "spell_types": ["spell", "cantrip", "ritual", "enchantment"],
-            "spirit_types": ["spirit", "elemental", "nature spirit", "man spirit"],
-            "magic_terms": ["mage", "shaman", "adept", "mystic adept", "awakened"],
-            "astral": ["astral", "astral projection", "astral space", "astral sight"]
-        }
+        # Extract pattern categories for easier access
+        self.weapon_patterns = self.patterns.get("gear", {})
+        self.matrix_patterns = self.patterns.get("matrix", {})
+        self.magic_patterns = self.patterns.get("magic", {})
+        self.rigger_patterns = self.patterns.get("riggers", {})
+        self.combat_patterns = self.patterns.get("combat", {})
+        self.skills_patterns = self.patterns.get("skills", {})
+        self.chargen_patterns = self.patterns.get("character_creation", {})
+        self.social_patterns = self.patterns.get("social", {})
 
         # Query intent patterns
         self.intent_patterns = {
@@ -85,6 +50,27 @@ class ShadowrunQueryProcessor:
             "comparison": ["vs", "versus", "compare", "better than", "difference between"],
             "rules_question": ["how to", "rules for", "how does", "can i", "is it possible"],
             "cost_availability": ["cost", "price", "how much", "availability", "where to buy"]
+        }
+
+    def _get_basic_patterns(self) -> Dict:
+        """Fallback patterns if verified patterns not available."""
+        return {
+            "gear": {
+                "manufacturers": ["ares", "colt", "ruger", "browning", "remington"],
+                "weapon_types": ["pistol", "rifle", "shotgun", "smg"],
+                "specific_weapons": ["predator", "government 2066", "ultra-power"],
+                "weapon_stats": ["accuracy", "damage", "ap", "mode", "cost"]
+            },
+            "matrix": {
+                "ic_programs": ["black ic", "white ic", "killer ic"],
+                "matrix_actions": ["hack on the fly", "brute force", "data spike"],
+                "matrix_damage": ["matrix damage", "biofeedback", "dumpshock"]
+            },
+            "magic": {
+                "specific_spells": ["fireball", "manabolt", "lightning bolt"],
+                "spell_mechanics": ["force", "drain", "spellcasting"],
+                "awakened_types": ["mage", "shaman", "adept"]
+            }
         }
 
     def analyze_query(self, query: str) -> QueryAnalysis:
@@ -123,44 +109,59 @@ class ShadowrunQueryProcessor:
             "weapon": 0,
             "matrix": 0,
             "magic": 0,
+            "rigger": 0,
+            "combat": 0,
             "skill": 0,
             "character": 0,
+            "social": 0,
             "setting": 0
         }
 
         # Score weapon intent
-        for category, patterns in self.weapon_patterns.items():
-            if isinstance(patterns, dict):
-                for subcategory, terms in patterns.items():
-                    for term in terms:
-                        if term in query:
-                            intent_scores["weapon"] += 2
-            else:
-                for term in patterns:
+        for category, terms in self.weapon_patterns.items():
+            if isinstance(terms, list):
+                for term in terms:
                     if term in query:
-                        intent_scores["weapon"] += 1
+                        intent_scores["weapon"] += 2
 
         # Score matrix intent
-        for category, patterns in self.matrix_patterns.items():
-            for term in patterns:
-                if term in query:
-                    intent_scores["matrix"] += 2
+        for category, terms in self.matrix_patterns.items():
+            if isinstance(terms, list):
+                for term in terms:
+                    if term in query:
+                        intent_scores["matrix"] += 2
 
         # Score magic intent
-        for category, patterns in self.magic_patterns.items():
-            for term in patterns:
-                if term in query:
-                    intent_scores["magic"] += 2
+        for category, terms in self.magic_patterns.items():
+            if isinstance(terms, list):
+                for term in terms:
+                    if term in query:
+                        intent_scores["magic"] += 2
 
-        # Additional scoring for context clues
-        if any(word in query for word in ["gun", "weapon", "pistol", "rifle", "blade"]):
-            intent_scores["weapon"] += 1
+        # Score rigger intent
+        for category, terms in self.rigger_patterns.items():
+            if isinstance(terms, list):
+                for term in terms:
+                    if term in query:
+                        intent_scores["rigger"] += 2
 
-        if any(word in query for word in ["hack", "cyberdeck", "matrix"]):
-            intent_scores["matrix"] += 1
+        # Additional context scoring
+        context_clues = {
+            "weapon": ["gun", "weapon", "pistol", "rifle", "blade", "stats", "damage"],
+            "matrix": ["hack", "cyberdeck", "ic", "matrix", "program", "firewall"],
+            "magic": ["spell", "magic", "spirit", "mage", "cast", "force", "drain"],
+            "rigger": ["drone", "vehicle", "pilot", "rig", "jumped in"],
+            "combat": ["attack", "defense", "initiative", "combat", "fight"],
+            "skill": ["test", "dice pool", "skill", "attribute", "roll"],
+            "character": ["build", "creation", "priority", "karma", "chargen"],
+            "social": ["contact", "lifestyle", "reputation", "negotiation"],
+            "setting": ["lore", "background", "corp", "history", "timeline"]
+        }
 
-        if any(word in query for word in ["spell", "magic", "spirit"]):
-            intent_scores["magic"] += 1
+        for intent, clues in context_clues.items():
+            for clue in clues:
+                if clue in query:
+                    intent_scores[intent] += 1
 
         # Return highest scoring intent
         if max(intent_scores.values()) == 0:
@@ -173,29 +174,14 @@ class ShadowrunQueryProcessor:
 
         entities = []
 
-        # Extract weapon entities
-        for category, patterns in self.weapon_patterns.items():
-            if isinstance(patterns, dict):
-                for subcategory, terms in patterns.items():
+        # Extract from all pattern categories
+        for section_patterns in [self.weapon_patterns, self.matrix_patterns, self.magic_patterns,
+                                self.rigger_patterns, self.combat_patterns, self.skills_patterns]:
+            for category, terms in section_patterns.items():
+                if isinstance(terms, list):
                     for term in terms:
                         if term in query:
                             entities.append(term)
-            else:
-                for term in patterns:
-                    if term in query:
-                        entities.append(term)
-
-        # Extract matrix entities
-        for category, patterns in self.matrix_patterns.items():
-            for term in patterns:
-                if term in query:
-                    entities.append(term)
-
-        # Extract magic entities
-        for category, patterns in self.magic_patterns.items():
-            for term in patterns:
-                if term in query:
-                    entities.append(term)
 
         return list(set(entities))  # Remove duplicates
 
@@ -221,54 +207,49 @@ class ShadowrunQueryProcessor:
         filters = {}
         boost_terms = []
 
-        if intent == "weapon":
+        # Map intents to sections
+        section_mapping = {
+            "weapon": "Gear",
+            "magic": "Magic",
+            "matrix": "Matrix",
+            "rigger": "Riggers",
+            "combat": "Combat",
+            "skill": "Skills",
+            "character": "Character_Creation",
+            "social": "Social",
+            "setting": "Setting"
+        }
+
+        if intent in section_mapping:
+            target_section = section_mapping[intent]
+
             filters = {
-                "primary_section": {"$eq": "Gear"},
+                "primary_section": {"$eq": target_section},
                 "$or": [
                     {"content_type": {"$eq": "table"}},
-                    {"contains_rules": {"$eq": True}}
-                ]
-            }
-
-            # Add weapon-specific boost terms
-            boost_terms.extend([
-                "weapon", "damage", "accuracy", "ap", "mode", "cost", "availability"
-            ])
-
-            # Add specific entities as high-priority boost terms
-            boost_terms.extend(entities)
-
-        elif intent == "matrix":
-            filters = {
-                "primary_section": {"$eq": "Matrix"},
-                "$or": [
                     {"contains_rules": {"$eq": True}},
                     {"content_type": {"$eq": "explicit_rule"}}
                 ]
             }
 
-            boost_terms.extend([
-                "matrix", "ic", "hack", "cyberdeck", "firewall", "sleaze"
-            ])
-            boost_terms.extend(entities)
-
-        elif intent == "magic":
-            filters = {
-                "primary_section": {"$eq": "Magic"},
-                "$or": [
-                    {"contains_rules": {"$eq": True}},
-                    {"content_type": {"$eq": "explicit_rule"}}
-                ]
+            # Section-specific boost terms
+            section_boost_terms = {
+                "Gear": ["weapon", "damage", "accuracy", "ap", "cost", "gear", "equipment"],
+                "Magic": ["spell", "spirit", "magic", "force", "drain", "astral", "mana"],
+                "Matrix": ["matrix", "ic", "hack", "cyberdeck", "firewall", "program"],
+                "Riggers": ["drone", "vehicle", "pilot", "rigger", "jumped in", "rcc"],
+                "Combat": ["combat", "attack", "defense", "initiative", "damage", "armor"],
+                "Skills": ["skill", "test", "dice pool", "attribute", "threshold"],
+                "Character_Creation": ["priority", "karma", "metatype", "quality", "creation"],
+                "Social": ["contact", "lifestyle", "reputation", "social", "etiquette"],
+                "Setting": ["corporation", "history", "timeline", "location", "lore"]
             }
 
-            boost_terms.extend([
-                "magic", "spell", "spirit", "astral", "mage", "drain"
-            ])
+            boost_terms.extend(section_boost_terms.get(target_section, []))
             boost_terms.extend(entities)
 
         else:
-            # General query - no strict filters
-            filters = {}
+            # General query - no strict filters but still boost with entities
             boost_terms.extend(entities)
 
         return filters, boost_terms

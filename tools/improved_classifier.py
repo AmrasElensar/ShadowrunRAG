@@ -5,8 +5,6 @@ Replaces tools/improved_classifier.py completely.
 
 import re
 import logging
-import hashlib
-from pathlib import Path
 from typing import List, Dict, Optional, Callable
 from tools.improved_semantic_chunker import create_improved_semantic_chunker
 from tools.llm_classifier import create_two_tier_classifier

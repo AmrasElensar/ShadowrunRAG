@@ -1,28 +1,16 @@
 """
-Unified LLM-based classifier using qwen2.5:14b for consistent Shadowrun content classification.
-Replaces tools/llm_classifier.py
+Fixed LLM classifier implementation that corrects the circular import and incomplete class issues.
 """
 
 import json
 import logging
 import re
 import time
-from pathlib import Path
 from typing import Dict, List, Any, Optional
 import ollama
 
-from .verified_shadowrun_patterns import (
-    VERIFIED_SHADOWRUN_PATTERNS,
-    detect_verified_magic_content,
-    detect_verified_rigger_content,
-    detect_verified_combat_content,
-    detect_verified_social_content,
-    detect_verified_character_creation_content,
-    detect_verified_skills_content,
-    create_verified_detector_set
-)
-
 logger = logging.getLogger(__name__)
+
 
 ENHANCED_CLASSIFICATION_PROMPT = """You are an expert Shadowrun tabletop RPG content analyzer. Classify this content with high precision.
 
@@ -87,53 +75,192 @@ Respond ONLY with valid JSON:
 RESPOND ONLY WITH THE JSON OBJECT. NO OTHER TEXT."""
 
 
-class TwoTierShadowrunClassifier:
-    """Two-tier classification: LLM reasoning + pattern-based corrections."""
+class EnhancedLLMClassifier:
+    """LLM classifier with improved prompt."""
 
-    def __init__(self, model_name: str = "qwen2.5:14b-instruct-q6_K"):
+    def __init__(self, model_name: str):
         self.model_name = model_name
-        self.llm_classifier = EnhancedLLMClassifier(model_name)
-        self.pattern_corrector = PatternBasedCorrector()
+        self.classification_prompt = ENHANCED_CLASSIFICATION_PROMPT
+        self._ensure_model_available()
 
-        # Weapon detection patterns (high confidence)
+    def _ensure_model_available(self):
+        """Check if model is available."""
+        try:
+            test_response = ollama.chat(
+                model=self.model_name,
+                messages=[{"role": "user", "content": "Test classification"}],
+                options={"num_predict": 10, "temperature": 0.1}
+            )
+            logger.info(f"LLM classifier using model: {self.model_name}")
+        except Exception as e:
+            logger.error(f"Model {self.model_name} not available: {e}")
+            self.model_name = None
+
+    def classify_with_llm(self, text: str, max_retries: int = 2) -> Optional[Dict]:
+        """Classify using enhanced LLM prompt."""
+
+        if not self.model_name:
+            return None
+
+        # Truncate very long text to first 1500 chars for classification
+        sample_text = text[:1500] if len(text) > 1500 else text
+
+        for attempt in range(max_retries + 1):
+            try:
+                prompt = self.classification_prompt.format(text=sample_text)
+
+                response = ollama.chat(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={
+                        "temperature": 0.1,
+                        "top_p": 0.9,
+                        "num_predict": 300,
+                        "stop": ["\n\n", "```"]
+                    }
+                )
+
+                response_text = response["message"]["content"].strip()
+
+                # Clean response - remove any markdown formatting
+                response_text = re.sub(r'```json\s*', '', response_text)
+                response_text = re.sub(r'```\s*$', '', response_text)
+
+                result = json.loads(response_text)
+
+                # Validate required fields
+                required_fields = ["primary_section", "content_type", "contains_rules", "confidence"]
+                if all(field in result for field in required_fields):
+                    return result
+                else:
+                    logger.warning(f"LLM result missing required fields: {result}")
+
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON decode error (attempt {attempt + 1}): {e}")
+
+            except Exception as e:
+                logger.warning(f"LLM classification error (attempt {attempt + 1}): {e}")
+
+            if attempt < max_retries:
+                time.sleep(1)
+
+        return None
+
+
+class PatternBasedCorrector:
+    """Pattern-based corrections and enhancements to LLM results."""
+
+    def __init__(self):
+        # Try to import verified patterns, fallback to basic patterns
+        try:
+            from .verified_shadowrun_patterns import VERIFIED_SHADOWRUN_PATTERNS, create_verified_detector_set
+            self.verified_patterns = VERIFIED_SHADOWRUN_PATTERNS
+            self.verified_detectors = create_verified_detector_set()
+        except ImportError:
+            logger.warning("Verified patterns not found, using basic patterns")
+            self.verified_patterns = self._get_basic_patterns()
+            self.verified_detectors = {}
+
+        # Basic weapon patterns for detection
         self.weapon_patterns = {
-            "manufacturers": ["ares", "colt", "ruger", "browning", "remington", "defiance",
-                              "yamaha", "hk", "fichetti", "beretta", "taurus", "steyr"],
-            "weapon_types": ["pistol", "rifle", "shotgun", "smg", "assault rifle", "sniper rifle",
-                             "machine gun", "crossbow", "sword", "blade", "knife", "club"],
+            "manufacturers": ["ares", "colt", "ruger", "browning", "remington", "defiance"],
+            "weapon_types": ["pistol", "rifle", "shotgun", "smg", "assault rifle"],
             "weapon_stats": ["acc", "damage", "ap", "mode", "rc", "ammo", "avail", "cost"],
-            "specific_weapons": ["predator", "government 2066", "ultra-power", "roomsweeper",
-                                 "super warhawk", "crusader", "black scorpion", "ak-97"],
-            "weapon_accessories": ["smartgun", "laser sight", "silencer", "scope", "foregrip"],
+            "specific_weapons": ["predator", "government 2066", "ultra-power", "roomsweeper"],
             "damage_patterns": [r'\d+P\s*(?:\(f\))?', r'AP\s*-\d+', r'\d+S\s*\(e\)']
         }
 
-        # Matrix detection patterns
+        # Basic matrix patterns
         self.matrix_patterns = {
-            "ic_programs": ["black ic", "white ic", "gray ic", "ic attack", "killer ic", "marker ic"],
+            "ic_programs": ["black ic", "white ic", "gray ic", "killer ic", "marker ic"],
             "matrix_damage": ["matrix damage", "biofeedback", "dumpshock", "link-lock"],
-            "hacking_terms": ["cyberdeck", "firewall", "sleaze", "data processing", "matrix attributes"],
-            "matrix_actions": ["hack on the fly", "brute force", "data spike", "crash program"]
+            "hacking_terms": ["cyberdeck", "firewall", "sleaze", "data processing"],
+            "matrix_actions": ["hack on the fly", "brute force", "data spike"]
         }
 
-        # Add comprehensive patterns
-        self.verified_patterns = VERIFIED_SHADOWRUN_PATTERNS
-        self.verified_detectors = create_verified_detector_set()
+    def _get_basic_patterns(self) -> Dict:
+        """Fallback patterns if verified patterns not available."""
+        return {
+            "gear": {
+                "manufacturers": ["ares", "colt", "ruger", "browning"],
+                "weapon_types": ["pistol", "rifle", "shotgun"],
+                "specific_weapons": ["predator", "government 2066"]
+            },
+            "matrix": {
+                "ic_programs": ["black ic", "white ic"],
+                "matrix_damage": ["matrix damage", "biofeedback"]
+            }
+        }
 
-    def classify_content(self, text: str, source: str) -> Dict[str, Any]:
-        """Main classification method with two-tier approach."""
+    def apply_corrections(self, text: str, llm_result: Dict, source: str) -> Dict[str, Any]:
+        """Apply pattern-based corrections to LLM classification."""
 
-        # Tier 1: LLM semantic understanding
-        llm_result = self.llm_classifier.classify_with_llm(text)
+        # Check for weapon content override
+        weapon_indicators = self._detect_weapon_content(text)
+        matrix_indicators = self._detect_matrix_content(text)
 
-        if not llm_result:
-            logger.warning("LLM classification failed, using pattern fallback")
-            return self.pattern_corrector.classify_with_patterns(text, source)
+        # High-confidence weapon override
+        if weapon_indicators["confidence_score"] >= 0.4:
+            if llm_result["primary_section"] != "Gear":
+                logger.info(f"Pattern override: Weapon content detected → Gear (confidence: {weapon_indicators['confidence_score']:.2f})")
+                llm_result["primary_section"] = "Gear"
+                llm_result["confidence"] = min(0.9, weapon_indicators["confidence_score"])
+                llm_result["classification_method"] = "pattern_corrected"
 
-        # Tier 2: Pattern-based corrections and enhancements
-        corrected_result = self.pattern_corrector.apply_corrections(text, llm_result, source)
+                # Update content type if weapon table detected
+                if len(weapon_indicators.get("weapon_stats_found", [])) >= 3:
+                    llm_result["content_type"] = "table"
 
-        return corrected_result
+        # High-confidence Matrix override
+        elif matrix_indicators["confidence_score"] >= 0.5:
+            if llm_result["primary_section"] != "Matrix":
+                logger.info(f"Pattern override: Matrix content detected → Matrix (confidence: {matrix_indicators['confidence_score']:.2f})")
+                llm_result["primary_section"] = "Matrix"
+                llm_result["confidence"] = min(0.9, matrix_indicators["confidence_score"])
+                llm_result["classification_method"] = "pattern_corrected"
+
+        # Use verified detectors if available
+        if self.verified_detectors:
+            all_detectors = {
+                "Gear": weapon_indicators,
+                "Matrix": matrix_indicators,
+                **{section: detector(text.lower()) for section, detector in self.verified_detectors.items()}
+            }
+
+            # Find best section
+            best_section = max(all_detectors.items(), key=lambda x: x[1].get("confidence_score", 0))
+            if best_section[1].get("confidence_score", 0) > 0.5:
+                llm_result["primary_section"] = best_section[0]
+
+        # Enhance keywords with pattern findings
+        enhanced_keywords = list(llm_result.get("mechanical_keywords", []))
+        enhanced_topics = list(llm_result.get("specific_topics", []))
+
+        # Add weapon-specific keywords
+        if weapon_indicators["confidence_score"] > 0.2:
+            enhanced_keywords.extend(weapon_indicators.get("weapon_types_found", []))
+            enhanced_topics.extend(weapon_indicators.get("specific_weapons_found", []))
+            enhanced_topics.extend(weapon_indicators.get("manufacturers_found", []))
+
+        # Add matrix-specific keywords
+        if matrix_indicators["confidence_score"] > 0.2:
+            enhanced_keywords.extend(weapon_indicators.get("hacking_terms_found", []))
+            enhanced_topics.extend(matrix_indicators.get("ic_programs_found", []))
+
+        llm_result["mechanical_keywords"] = list(set(enhanced_keywords))
+        llm_result["specific_topics"] = list(set(enhanced_topics))
+
+        # Add source and document metadata
+        llm_result.update({
+            "source": source,
+            "document_type": "rulebook",
+            "edition": "SR5",
+            "is_rule_definition": llm_result["contains_rules"],
+            "contains_dice_pools": llm_result.get("contains_dice_pools", False),
+            "contains_examples": llm_result.get("contains_examples", False)
+        })
+
+        return llm_result
 
     def _detect_weapon_content(self, text: str) -> Dict[str, Any]:
         """Detect weapon-specific content with high confidence."""
@@ -201,134 +328,11 @@ class TwoTierShadowrunClassifier:
 
         return matrix_indicators
 
-
-class EnhancedLLMClassifier:
-    """LLM classifier with improved prompt."""
-
-    def __init__(self, model_name: str):
-        self.model_name = model_name
-        # Use the enhanced prompt from the previous artifact
-        self.classification_prompt = ENHANCED_CLASSIFICATION_PROMPT  # From previous artifact
-
-    def classify_with_llm(self, text: str, max_retries: int = 2) -> Optional[Dict]:
-        """Classify using enhanced LLM prompt."""
-
-        # Truncate very long text to first 1500 chars for classification
-        sample_text = text[:1500] if len(text) > 1500 else text
-
-        for attempt in range(max_retries + 1):
-            try:
-                prompt = self.classification_prompt.format(text=sample_text)
-
-                response = ollama.chat(
-                    model=self.model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    options={
-                        "temperature": 0.1,
-                        "top_p": 0.9,
-                        "num_predict": 300,
-                        "stop": ["\n\n", "```"]
-                    }
-                )
-
-                response_text = response["message"]["content"].strip()
-
-                # Clean response - remove any markdown formatting
-                response_text = re.sub(r'```json\s*', '', response_text)
-                response_text = re.sub(r'```\s*$', '', response_text)
-
-                result = json.loads(response_text)
-
-                # Validate required fields
-                required_fields = ["primary_section", "content_type", "contains_rules", "confidence"]
-                if all(field in result for field in required_fields):
-                    return result
-                else:
-                    logger.warning(f"LLM result missing required fields: {result}")
-
-            except json.JSONDecodeError as e:
-                logger.warning(f"JSON decode error (attempt {attempt + 1}): {e}")
-
-            except Exception as e:
-                logger.warning(f"LLM classification error (attempt {attempt + 1}): {e}")
-
-            if attempt < max_retries:
-                time.sleep(1)
-
-        return None
-
-
-class PatternBasedCorrector:
-    """Pattern-based corrections and enhancements to LLM results."""
-
-    def __init__(self):
-        self.classifier = TwoTierShadowrunClassifier.__new__(TwoTierShadowrunClassifier)
-        self.classifier.__init__()  # Get weapon/matrix patterns
-
-    def apply_corrections(self, text: str, llm_result: Dict, source: str) -> Dict[str, Any]:
-        """Apply pattern-based corrections to LLM classification."""
-
-        # Check for weapon content override
-        weapon_indicators = self.classifier._detect_weapon_content(text)
-        matrix_indicators = self.classifier._detect_matrix_content(text)
-
-        # High-confidence weapon override
-        if weapon_indicators["confidence_score"] >= 0.4:
-            if llm_result["primary_section"] != "Gear":
-                logger.info(
-                    f"Pattern override: Weapon content detected → Gear (confidence: {weapon_indicators['confidence_score']:.2f})")
-                llm_result["primary_section"] = "Gear"
-                llm_result["confidence"] = min(0.9, weapon_indicators["confidence_score"])
-                llm_result["classification_method"] = "pattern_corrected"
-
-                # Update content type if weapon table detected
-                if len(weapon_indicators["weapon_stats_found"]) >= 3:
-                    llm_result["content_type"] = "table"
-
-        # High-confidence Matrix override
-        elif matrix_indicators["confidence_score"] >= 0.5:
-            if llm_result["primary_section"] != "Matrix":
-                logger.info(
-                    f"Pattern override: Matrix content detected → Matrix (confidence: {matrix_indicators['confidence_score']:.2f})")
-                llm_result["primary_section"] = "Matrix"
-                llm_result["confidence"] = min(0.9, matrix_indicators["confidence_score"])
-                llm_result["classification_method"] = "pattern_corrected"
-
-        # Enhance keywords with pattern findings
-        enhanced_keywords = list(llm_result.get("mechanical_keywords", []))
-        enhanced_topics = list(llm_result.get("specific_topics", []))
-
-        # Add weapon-specific keywords
-        if weapon_indicators["confidence_score"] > 0.2:
-            enhanced_keywords.extend(weapon_indicators["weapon_types_found"])
-            enhanced_topics.extend(weapon_indicators["specific_weapons_found"])
-            enhanced_topics.extend(weapon_indicators["manufacturers_found"])
-
-        # Add matrix-specific keywords
-        if matrix_indicators["confidence_score"] > 0.2:
-            enhanced_keywords.extend(matrix_indicators["hacking_terms_found"])
-            enhanced_topics.extend(matrix_indicators["ic_programs_found"])
-
-        llm_result["mechanical_keywords"] = list(set(enhanced_keywords))
-        llm_result["specific_topics"] = list(set(enhanced_topics))
-
-        # Add source and document metadata
-        llm_result.update({
-            "source": source,
-            "document_type": "rulebook",
-            "edition": "SR5",
-            "is_rule_definition": llm_result["contains_rules"],
-            "contains_dice_pools": llm_result.get("contains_dice_pools", False),
-            "contains_examples": llm_result.get("contains_examples", False)
-        })
-
-        return llm_result
-
     def classify_with_patterns(self, text: str, source: str) -> Dict[str, Any]:
         """Emergency fallback: pure pattern classification."""
 
-        weapon_indicators = self.classifier._detect_weapon_content(text)
-        matrix_indicators = self.classifier._detect_matrix_content(text)
+        weapon_indicators = self._detect_weapon_content(text)
+        matrix_indicators = self._detect_matrix_content(text)
 
         if weapon_indicators["confidence_score"] > matrix_indicators["confidence_score"]:
             primary_section = "Gear"
@@ -345,7 +349,7 @@ class PatternBasedCorrector:
             "document_type": "rulebook",
             "edition": "SR5",
             "primary_section": primary_section,
-            "content_type": "explicit_rule" if "test" in text.lower() else "narrative",
+            "content_type": "explicit_rule" if "dice pool" in text.lower() else "narrative",
             "contains_rules": "dice pool" in text.lower() or "test" in text.lower(),
             "is_rule_definition": "dice pool" in text.lower(),
             "contains_dice_pools": "dice pool" in text.lower(),
@@ -357,7 +361,45 @@ class PatternBasedCorrector:
         }
 
 
+class TwoTierShadowrunClassifier:
+    """Two-tier classification: LLM reasoning + pattern-based corrections."""
+
+    def __init__(self, model_name: str = "qwen2.5:14b-instruct-q6_K"):
+        self.model_name = model_name
+        self.llm_classifier = EnhancedLLMClassifier(model_name)
+        self.pattern_corrector = PatternBasedCorrector()
+
+    def classify_content(self, text: str, source: str) -> Dict[str, Any]:
+        """Main classification method with two-tier approach."""
+
+        # Tier 1: LLM semantic understanding
+        llm_result = self.llm_classifier.classify_with_llm(text)
+
+        if not llm_result:
+            logger.warning("LLM classification failed, using pattern fallback")
+            return self.pattern_corrector.classify_with_patterns(text, source)
+
+        # Tier 2: Pattern-based corrections and enhancements
+        corrected_result = self.pattern_corrector.apply_corrections(text, llm_result, source)
+
+        return corrected_result
+
+    def _detect_weapon_content(self, text: str) -> Dict[str, Any]:
+        """Detect weapon-specific content - delegates to pattern corrector."""
+        return self.pattern_corrector._detect_weapon_content(text)
+
+    def _detect_matrix_content(self, text: str) -> Dict[str, Any]:
+        """Detect matrix-specific content - delegates to pattern corrector."""
+        return self.pattern_corrector._detect_matrix_content(text)
+
+
 # Factory function for compatibility
 def create_two_tier_classifier(model_name: str = "qwen2.5:14b-instruct-q6_K") -> TwoTierShadowrunClassifier:
     """Create two-tier classifier instance."""
     return TwoTierShadowrunClassifier(model_name=model_name)
+
+
+# Backward compatibility - keep existing function name
+def create_llm_classifier(model_name: str = "qwen2.5:14b-instruct-q6_K") -> TwoTierShadowrunClassifier:
+    """Backward compatibility function."""
+    return create_two_tier_classifier(model_name)
