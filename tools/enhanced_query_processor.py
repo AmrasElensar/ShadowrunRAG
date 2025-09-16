@@ -1,6 +1,6 @@
 """
-Fixed Enhanced query processing system that improves retrieval targeting.
-This fixes the implementation issues in the current version.
+Enhanced query processing system that improves retrieval targeting.
+Consolidates all query processing logic.
 """
 
 import re
@@ -22,7 +22,7 @@ class QueryAnalysis:
     confidence: float  # Confidence in analysis
 
 
-class ShadowrunQueryProcessor:
+class EnhancedQueryProcessor:
     """Enhanced query processor for better content targeting."""
 
     def __init__(self):
@@ -56,29 +56,26 @@ class ShadowrunQueryProcessor:
         """Fallback patterns if verified patterns not available."""
         return {
             "gear": {
-                "manufacturers": ["ares", "colt", "ruger", "browning", "remington"],
-                "weapon_types": ["pistol", "rifle", "shotgun", "smg"],
-                "specific_weapons": ["predator", "government 2066", "ultra-power"],
-                "weapon_stats": ["accuracy", "damage", "ap", "mode", "cost"]
+                "manufacturers": ["ares", "colt", "ruger", "browning"],
+                "weapon_types": ["pistol", "rifle", "shotgun"],
+                "specific_weapons": ["predator", "government 2066"]
             },
             "matrix": {
-                "ic_programs": ["black ic", "white ic", "killer ic"],
-                "matrix_actions": ["hack on the fly", "brute force", "data spike"],
-                "matrix_damage": ["matrix damage", "biofeedback", "dumpshock"]
+                "ic_programs": ["black ic", "white ic"],
+                "matrix_damage": ["matrix damage", "biofeedback"]
             },
             "magic": {
-                "specific_spells": ["fireball", "manabolt", "lightning bolt"],
-                "spell_mechanics": ["force", "drain", "spellcasting"],
-                "awakened_types": ["mage", "shaman", "adept"]
+                "specific_spells": ["fireball", "manabolt"],
+                "magic_skills": ["spellcasting", "summoning"]
             }
         }
 
     def analyze_query(self, query: str) -> QueryAnalysis:
-        """Analyze user query to determine intent and target content."""
+        """Comprehensive query analysis for better retrieval targeting."""
 
-        query_lower = query.lower().strip()
+        query_lower = query.lower()
 
-        # Determine primary intent
+        # Determine intent
         intent = self._determine_intent(query_lower)
 
         # Extract entities
@@ -103,71 +100,83 @@ class ShadowrunQueryProcessor:
         )
 
     def _determine_intent(self, query: str) -> str:
-        """Determine the primary intent/domain of the query."""
+        """Determine the primary intent of the query."""
 
-        intent_scores = {
-            "weapon": 0,
-            "matrix": 0,
-            "magic": 0,
-            "rigger": 0,
-            "combat": 0,
-            "skill": 0,
-            "character": 0,
-            "social": 0,
-            "setting": 0
-        }
-
-        # Score weapon intent
+        # Check for weapon-related queries
+        weapon_score = 0
         for category, terms in self.weapon_patterns.items():
-            if isinstance(terms, list):
-                for term in terms:
-                    if term in query:
-                        intent_scores["weapon"] += 2
+            for term in terms:
+                if term in query:
+                    weapon_score += 1
 
-        # Score matrix intent
+        # Check for matrix-related queries
+        matrix_score = 0
         for category, terms in self.matrix_patterns.items():
-            if isinstance(terms, list):
-                for term in terms:
-                    if term in query:
-                        intent_scores["matrix"] += 2
+            for term in terms:
+                if term in query:
+                    matrix_score += 1
 
-        # Score magic intent
+        # Check for magic-related queries
+        magic_score = 0
         for category, terms in self.magic_patterns.items():
-            if isinstance(terms, list):
-                for term in terms:
-                    if term in query:
-                        intent_scores["magic"] += 2
+            for term in terms:
+                if term in query:
+                    magic_score += 1
 
-        # Score rigger intent
+        # Check for rigger-related queries
+        rigger_score = 0
         for category, terms in self.rigger_patterns.items():
-            if isinstance(terms, list):
-                for term in terms:
-                    if term in query:
-                        intent_scores["rigger"] += 2
+            for term in terms:
+                if term in query:
+                    rigger_score += 1
 
-        # Additional context scoring
-        context_clues = {
-            "weapon": ["gun", "weapon", "pistol", "rifle", "blade", "stats", "damage"],
-            "matrix": ["hack", "cyberdeck", "ic", "matrix", "program", "firewall"],
-            "magic": ["spell", "magic", "spirit", "mage", "cast", "force", "drain"],
-            "rigger": ["drone", "vehicle", "pilot", "rig", "jumped in"],
-            "combat": ["attack", "defense", "initiative", "combat", "fight"],
-            "skill": ["test", "dice pool", "skill", "attribute", "roll"],
-            "character": ["build", "creation", "priority", "karma", "chargen"],
-            "social": ["contact", "lifestyle", "reputation", "negotiation"],
-            "setting": ["lore", "background", "corp", "history", "timeline"]
-        }
+        # Check for combat-related queries
+        combat_score = 0
+        for category, terms in self.combat_patterns.items():
+            for term in terms:
+                if term in query:
+                    combat_score += 1
 
-        for intent, clues in context_clues.items():
-            for clue in clues:
-                if clue in query:
-                    intent_scores[intent] += 1
+        # Check for skills-related queries
+        skills_score = 0
+        for category, terms in self.skills_patterns.items():
+            for term in terms:
+                if term in query:
+                    skills_score += 1
 
-        # Return highest scoring intent
-        if max(intent_scores.values()) == 0:
+        # Check for character creation queries
+        chargen_score = 0
+        for category, terms in self.chargen_patterns.items():
+            for term in terms:
+                if term in query:
+                    chargen_score += 1
+
+        # Check for social queries
+        social_score = 0
+        for category, terms in self.social_patterns.items():
+            for term in terms:
+                if term in query:
+                    social_score += 1
+
+        # Determine highest scoring intent
+        scores = [
+            ("weapon", weapon_score),
+            ("matrix", matrix_score),
+            ("magic", magic_score),
+            ("rigger", rigger_score),
+            ("combat", combat_score),
+            ("skills", skills_score),
+            ("character_creation", chargen_score),
+            ("social", social_score)
+        ]
+
+        intent, max_score = max(scores, key=lambda x: x[1])
+
+        # Default to general if no strong signals
+        if max_score == 0:
             return "general"
 
-        return max(intent_scores, key=intent_scores.get)
+        return intent
 
     def _extract_entities(self, query: str) -> List[str]:
         """Extract specific entities mentioned in the query."""
@@ -176,7 +185,8 @@ class ShadowrunQueryProcessor:
 
         # Extract from all pattern categories
         for section_patterns in [self.weapon_patterns, self.matrix_patterns, self.magic_patterns,
-                                self.rigger_patterns, self.combat_patterns, self.skills_patterns]:
+                                self.rigger_patterns, self.combat_patterns, self.skills_patterns,
+                                self.chargen_patterns, self.social_patterns]:
             for category, terms in section_patterns.items():
                 if isinstance(terms, list):
                     for term in terms:
@@ -207,50 +217,48 @@ class ShadowrunQueryProcessor:
         filters = {}
         boost_terms = []
 
-        # Map intents to sections
-        section_mapping = {
-            "weapon": "Gear",
-            "magic": "Magic",
-            "matrix": "Matrix",
-            "rigger": "Riggers",
-            "combat": "Combat",
-            "skill": "Skills",
-            "character": "Character_Creation",
-            "social": "Social",
-            "setting": "Setting"
-        }
+        # Intent-based filters
+        if intent == "weapon":
+            filters["primary_section"] = "Gear"
+            boost_terms.extend(["weapon", "damage", "accuracy", "cost"])
 
-        if intent in section_mapping:
-            target_section = section_mapping[intent]
+        elif intent == "matrix":
+            filters["primary_section"] = "Matrix"
+            boost_terms.extend(["matrix", "hacking", "cyberdeck", "ic"])
 
-            filters = {
-                "primary_section": {"$eq": target_section},
-                "$or": [
-                    {"content_type": {"$eq": "table"}},
-                    {"contains_rules": {"$eq": True}},
-                    {"content_type": {"$eq": "explicit_rule"}}
-                ]
-            }
+        elif intent == "magic":
+            filters["primary_section"] = "Magic"
+            boost_terms.extend(["spell", "magic", "force", "drain"])
 
-            # Section-specific boost terms
-            section_boost_terms = {
-                "Gear": ["weapon", "damage", "accuracy", "ap", "cost", "gear", "equipment"],
-                "Magic": ["spell", "spirit", "magic", "force", "drain", "astral", "mana"],
-                "Matrix": ["matrix", "ic", "hack", "cyberdeck", "firewall", "program"],
-                "Riggers": ["drone", "vehicle", "pilot", "rigger", "jumped in", "rcc"],
-                "Combat": ["combat", "attack", "defense", "initiative", "damage", "armor"],
-                "Skills": ["skill", "test", "dice pool", "attribute", "threshold"],
-                "Character_Creation": ["priority", "karma", "metatype", "quality", "creation"],
-                "Social": ["contact", "lifestyle", "reputation", "social", "etiquette"],
-                "Setting": ["corporation", "history", "timeline", "location", "lore"]
-            }
+        elif intent == "rigger":
+            filters["primary_section"] = "Riggers"
+            boost_terms.extend(["drone", "vehicle", "rigger", "pilot"])
 
-            boost_terms.extend(section_boost_terms.get(target_section, []))
-            boost_terms.extend(entities)
+        elif intent == "combat":
+            filters["primary_section"] = "Combat"
+            boost_terms.extend(["combat", "initiative", "damage", "test"])
 
-        else:
-            # General query - no strict filters but still boost with entities
-            boost_terms.extend(entities)
+        elif intent == "skills":
+            filters["primary_section"] = "Skills"
+            boost_terms.extend(["skill", "dice pool", "test", "threshold"])
+
+        elif intent == "character_creation":
+            filters["primary_section"] = "Character_Creation"
+            boost_terms.extend(["priority", "attribute", "metatype", "karma"])
+
+        elif intent == "social":
+            filters["primary_section"] = "Social"
+            boost_terms.extend(["contact", "etiquette", "negotiation", "loyalty"])
+
+        # Add entities as boost terms
+        boost_terms.extend(entities)
+
+        # Query type specific filters
+        if any(term in query for term in ["table", "list", "stats"]):
+            filters["content_type"] = "table"
+
+        elif any(term in query for term in ["rule", "mechanic", "how to"]):
+            filters["contains_rules"] = True
 
         return filters, boost_terms
 
@@ -259,101 +267,66 @@ class ShadowrunQueryProcessor:
 
         confidence = 0.5  # Base confidence
 
-        # Boost confidence for clear intent indicators
-        if intent != "general":
-            confidence += 0.2
-
-        # Boost confidence for specific entities
+        # Boost confidence for specific entities found
         if entities:
             confidence += min(0.3, len(entities) * 0.1)
 
-        # Boost confidence for specific weapon/matrix/magic terms
-        specific_terms = 0
-        for term in ["predator", "ares", "matrix", "ic", "spell", "spirit"]:
-            if term in query:
-                specific_terms += 1
+        # Boost confidence for clear intent signals
+        if intent != "general":
+            confidence += 0.2
 
-        confidence += min(0.2, specific_terms * 0.05)
+        # Boost confidence for clear query structure
+        if any(term in query for term in ["what is", "how to", "tell me about"]):
+            confidence += 0.1
 
         return min(1.0, confidence)
 
-    def process_query_for_retrieval(self, query: str, max_results: int = 10) -> Dict[str, Any]:
-        """Process query and return parameters for ChromaDB retrieval."""
+    def build_enhanced_query(self, original_query: str, analysis: QueryAnalysis) -> str:
+        """Build an enhanced query string for better retrieval."""
 
-        analysis = self.analyze_query(query)
+        enhanced_parts = [original_query]
 
-        # Build search parameters
-        search_params = {
-            "query_texts": [query],
-            "n_results": max_results,
-            "include": ["documents", "metadatas", "distances"]
-        }
+        # Add boost terms if they're not already in the query
+        for term in analysis.boost_terms:
+            if term not in original_query.lower():
+                enhanced_parts.append(term)
 
-        # Add filters if high confidence
-        if analysis.confidence > 0.7 and analysis.filters:
-            search_params["where"] = analysis.filters
+        # Add entity synonyms for better matching
+        entity_synonyms = self._get_entity_synonyms(analysis.entities)
+        enhanced_parts.extend(entity_synonyms)
 
-        # Create enhanced query with boost terms
-        if analysis.boost_terms:
-            # Create expanded query with boost terms
-            expanded_query = f"{query} {' '.join(analysis.boost_terms[:5])}"
-            search_params["query_texts"] = [expanded_query]
+        return " ".join(enhanced_parts)
 
-        return {
-            "search_params": search_params,
-            "analysis": analysis,
-            "debug_info": {
-                "original_query": query,
-                "intent": analysis.intent,
-                "entities": analysis.entities,
-                "confidence": analysis.confidence,
-                "filters_applied": bool(analysis.filters),
-                "boost_terms": analysis.boost_terms[:5]
-            }
-        }
+    def _get_entity_synonyms(self, entities: List[str]) -> List[str]:
+        """Get synonyms for entities to improve matching."""
 
-    def explain_query_processing(self, query: str) -> str:
-        """Provide human-readable explanation of query processing."""
+        synonyms = []
 
-        analysis = self.analyze_query(query)
+        for entity in entities:
+            # Add common synonyms for weapons
+            if entity in ["pistol", "handgun"]:
+                synonyms.append("sidearm")
+            elif entity in ["rifle", "assault rifle"]:
+                synonyms.append("longarm")
+            elif entity in ["shotgun"]:
+                synonyms.append("scattergun")
 
-        explanation = f"Query Analysis for: '{query}'\n\n"
-        explanation += f"Detected Intent: {analysis.intent.title()}\n"
-        explanation += f"Confidence: {analysis.confidence:.2f}\n"
+            # Add common synonyms for matrix terms
+            elif entity in ["hacking", "matrix"]:
+                synonyms.append("cybercombat")
+            elif entity in ["cyberdeck"]:
+                synonyms.append("deck")
 
-        if analysis.entities:
-            explanation += f"Entities Found: {', '.join(analysis.entities)}\n"
+            # Add common synonyms for magic terms
+            elif entity in ["spell", "magic"]:
+                synonyms.append("magical")
+            elif entity in ["summoning"]:
+                synonyms.append("spirit")
 
-        explanation += f"Query Type: {analysis.query_type}\n"
-
-        if analysis.filters:
-            explanation += f"Applied Filters: {analysis.filters}\n"
-
-        if analysis.boost_terms:
-            explanation += f"Boost Terms: {', '.join(analysis.boost_terms[:5])}\n"
-
-        return explanation
+        return synonyms
 
 
-# Integration helper for existing system
-def create_enhanced_query_processor() -> ShadowrunQueryProcessor:
+# Factory function for integration
+def create_enhanced_query_processor() -> EnhancedQueryProcessor:
     """Create enhanced query processor instance."""
-    return ShadowrunQueryProcessor()
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    processor = ShadowrunQueryProcessor()
-
-    # Test queries
-    test_queries = [
-        "Give me all the details and statistics about the Ares Predator gun",
-        "What are the Matrix damage rules for IC attacks?",
-        "How do I cast a fireball spell?",
-        "Compare Ares Predator vs Colt Government 2066",
-        "What is biofeedback damage?"
-    ]
-
-    for query in test_queries:
-        print(processor.explain_query_processing(query))
-        print("-" * 50)
+    return EnhancedQueryProcessor()
