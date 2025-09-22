@@ -24,6 +24,7 @@ from .models import (
 from tools.pdf_processor import PDFProcessor
 from backend.character_manager import get_character_manager
 from backend.extractors import populate_reference_tables
+from tools.indexer_integration_patch import integrate_with_existing_indexer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -95,6 +96,7 @@ executor = ThreadPoolExecutor(max_workers=2)
 
 # Initialize components
 indexer = IncrementalIndexer()
+indexer = integrate_with_existing_indexer(indexer)
 retriever = Retriever()
 
 # Log initialization
