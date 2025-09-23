@@ -1,5 +1,7 @@
 """
-Incremental indexer with table-aware token-based chunking that preserves table integrity.
+Enhanced IncrementalIndexer with built-in entity extraction and ALL original functionality preserved.
+This combines the table-aware chunking, detailed logging, and all features from indexer_old.py
+with the new entity extraction capabilities.
 """
 
 import hashlib
@@ -18,6 +20,10 @@ import re
 from tools.unified_classifier import create_unified_classifier
 from tools.enhanced_query_processor import create_enhanced_query_processor
 
+# Entity extraction imports
+from tools.entity_registry_builder import create_entity_registry_builder
+from tools.registry_storage import create_entity_registry_storage
+
 # Check for optional dependencies
 try:
     import tiktoken
@@ -30,8 +36,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class IncrementalIndexer:
-    """Manage document indexing with ChromaDB and table-aware token-based chunking."""
+class EnhancedIncrementalIndexer:
+    """Enhanced incremental indexer with built-in entity extraction and ALL original functionality."""
 
     def __init__(
         self,
@@ -40,9 +46,11 @@ class IncrementalIndexer:
         embedding_model: str = "nomic-embed-text",
         chunk_size: int = 800,
         chunk_overlap: int = 150,
-        use_semantic_splitting: bool = True
+        use_semantic_splitting: bool = True,
+        entity_db_path: str = "data/entity_registry.db"
     ):
-        logger.info(f"Initializing table-aware indexer with {embedding_model}, chunk_size={chunk_size} tokens")
+        logger.info(f"Initializing Enhanced Table-Aware Indexer with entity extraction")
+        logger.info(f"Embedding model: {embedding_model}, chunk_size={chunk_size} tokens")
 
         self.chroma_path = Path(chroma_path)
         self.chroma_path.mkdir(parents=True, exist_ok=True)
@@ -76,12 +84,28 @@ class IncrementalIndexer:
             self._count_tokens = lambda text: len(text.split())
             logger.info("Using word-based token approximation")
 
-        # Initialize components
+        # Initialize components (original functionality)
         self.classifier = create_unified_classifier()
         self.query_processor = create_enhanced_query_processor()
 
+        # Initialize entity extraction components (new functionality)
+        logger.info("Initializing entity extraction components...")
+        self.entity_builder = create_entity_registry_builder()
+        self.entity_storage = create_entity_registry_storage(entity_db_path)
+
+        # Entity extraction statistics
+        self.entity_stats = {
+            "total_entities_extracted": 0,
+            "weapons_extracted": 0,
+            "spells_extracted": 0,
+            "ic_programs_extracted": 0,
+            "chunks_with_entities": 0
+        }
+
         current_chunks = self.collection.count()
+        registry_stats = self.entity_storage.get_registry_stats()
         logger.info(f"Indexer ready. Collection has {current_chunks} existing chunks")
+        logger.info(f"Entity Registry contains: {registry_stats}")
 
     def _load_index_metadata(self) -> Dict:
         """Load metadata about previously indexed files."""
@@ -182,7 +206,7 @@ class IncrementalIndexer:
         return tables
 
     def _chunk_document_with_table_awareness(self, text: str, source: str) -> List[Dict]:
-        """Chunk document while preserving table integrity."""
+        """Chunk document while preserving table integrity AND extracting entities."""
 
         # Import and use regex cleaner directly
         from tools.regex_text_cleaner import create_regex_cleaner
@@ -219,6 +243,7 @@ class IncrementalIndexer:
                 logger.info(f"    {i+1}. {section['title'][:50]}... ({section_tokens} tokens)")
 
         all_chunks = []
+        file_entity_count = 0
 
         for section_idx, section in enumerate(sections):
             section_tokens = self._count_tokens(section['content'])
@@ -227,13 +252,51 @@ class IncrementalIndexer:
             section_chunks = self._chunk_section_with_table_awareness(
                 section, source, section_idx, table_boundaries
             )
-            all_chunks.extend(section_chunks)
 
+            # Process each chunk for entity extraction
+            for chunk in section_chunks:
+                logger.info(f"    Extracting entities from chunk {chunk['id']}")
+                entities = self.entity_builder.extract_entities_from_chunk(chunk)
+
+                # Store entities if any found
+                if any(entities.values()):
+                    chunk_id = chunk.get("id", "")
+                    logger.info(f"      Storing entities for chunk {chunk_id}")
+                    self.entity_storage.store_entities(entities, chunk_id, source)
+
+                    # Update statistics
+                    entity_counts = {
+                        "weapons": len(entities.get("weapons", [])),
+                        "spells": len(entities.get("spells", [])),
+                        "ic_programs": len(entities.get("ic_programs", []))
+                    }
+
+                    total_entities = sum(entity_counts.values())
+                    file_entity_count += total_entities
+
+                    # Add entity metadata to chunk
+                    chunk_metadata = chunk.get("metadata", {})
+                    chunk_metadata["extracted_entities"] = entity_counts
+                    chunk_metadata["has_entities"] = True
+                    chunk["metadata"] = chunk_metadata
+
+                    logger.info(f"      Extracted {total_entities} entities: {entity_counts}")
+                else:
+                    logger.info(f"      No entities found in chunk")
+
+            all_chunks.extend(section_chunks)
             logger.info(f"    Section created {len(section_chunks)} chunks")
 
         # Add sequential links for context preservation
         logger.info("  Adding sequential links between chunks...")
         self._add_sequential_links(all_chunks)
+
+        # Update global statistics
+        if file_entity_count > 0:
+            chunks_with_entities = len([c for c in all_chunks if c.get("metadata", {}).get("has_entities")])
+            self.entity_stats["chunks_with_entities"] += chunks_with_entities
+            self.entity_stats["total_entities_extracted"] += file_entity_count
+            logger.info(f"  Entity extraction summary: {file_entity_count} total entities from {chunks_with_entities}/{len(all_chunks)} chunks")
 
         logger.info(f"  Document chunking complete: {len(all_chunks)} total chunks")
         return all_chunks
@@ -623,7 +686,7 @@ class IncrementalIndexer:
         return embeddings
 
     def index_file(self, file_path: Path) -> bool:
-        """Index a single file with comprehensive logging."""
+        """Index a single file with comprehensive logging and entity extraction."""
 
         logger.info(f"Processing: {file_path.name}")
 
@@ -660,8 +723,8 @@ class IncrementalIndexer:
             line_count = content.count('\n') + 1
             logger.info(f"  Content: {char_count:,} chars, {token_count:,} tokens, {line_count:,} lines")
 
-            # Create chunks with table awareness
-            logger.info("  Starting table-aware token-based chunking...")
+            # Create chunks with table awareness AND entity extraction
+            logger.info("  Starting table-aware token-based chunking with entity extraction...")
             chunks = self._chunk_document_with_table_awareness(content, str(file_path))
 
             if not chunks:
@@ -740,10 +803,10 @@ class IncrementalIndexer:
             logger.warning(f"  Error removing old chunks: {e}")
 
     def index_directory(self, directory_path: str, force_reindex: bool = False) -> Dict:
-        """Index all markdown files in a directory with progress tracking."""
+        """Index all markdown files in a directory with progress tracking and entity extraction."""
 
-        logger.info(f"Starting directory indexing: {directory_path}")
-        logger.info(f"Using TABLE-AWARE token-based chunking: {self.chunk_size} tokens per chunk, {self.chunk_overlap} token overlap")
+        logger.info(f"Starting enhanced directory indexing: {directory_path}")
+        logger.info(f"Using TABLE-AWARE token-based chunking with ENTITY EXTRACTION: {self.chunk_size} tokens per chunk, {self.chunk_overlap} token overlap")
         if force_reindex:
             logger.info("Force reindex enabled - will process all files")
 
@@ -761,6 +824,15 @@ class IncrementalIndexer:
 
         total_size = sum(f.stat().st_size for f in markdown_files)
         logger.info(f"Found {len(markdown_files)} files ({total_size/1024/1024:.1f} MB total)")
+
+        # Reset entity statistics for this run
+        self.entity_stats = {
+            "total_entities_extracted": 0,
+            "weapons_extracted": 0,
+            "spells_extracted": 0,
+            "ic_programs_extracted": 0,
+            "chunks_with_entities": 0
+        }
 
         results = {
             "success": True,
@@ -811,15 +883,27 @@ class IncrementalIndexer:
                 logger.error(f"  Fatal error: {e}")
 
         total_elapsed = time.time() - start_time
+        final_registry_stats = self.entity_storage.get_registry_stats()
 
-        logger.info(f"\nIndexing complete in {total_elapsed/60:.1f} minutes")
+        logger.info(f"\nEnhanced indexing complete in {total_elapsed/60:.1f} minutes")
         logger.info(f"Results: {results['indexed_files']} indexed, {results['skipped_files']} skipped, {results['failed_files']} failed")
+        logger.info(f"Entity Extraction Summary:")
+        logger.info(f"  - Total entities extracted: {self.entity_stats['total_entities_extracted']}")
+        logger.info(f"  - Chunks with entities: {self.entity_stats['chunks_with_entities']}")
+        logger.info(f"  - Registry contents: {final_registry_stats}")
 
         if results['errors']:
             logger.warning(f"Errors: {results['errors'][:3]}")
 
         final_count = self.collection.count()
         logger.info(f"Collection now has {final_count} total chunks")
+
+        # Add entity processing information to results
+        results["entity_processing"] = {
+            "entities_extracted": self.entity_stats["total_entities_extracted"],
+            "chunks_with_entities": self.entity_stats["chunks_with_entities"],
+            "registry_stats": final_registry_stats
+        }
 
         return results
 
@@ -877,11 +961,17 @@ class IncrementalIndexer:
             return {"error": str(e)}
 
     def search_debug(self, query: str, n_results: int = 5) -> Dict:
-        """Debug search to test retrieval."""
+        """Debug search to test retrieval with entity awareness."""
         try:
             # Use query processor to enhance query
             analysis = self.query_processor.analyze_query(query)
             enhanced_query = self.query_processor.build_enhanced_query(query, analysis)
+
+            # Extract entities from query
+            entities = self.entity_builder.extract_entities_from_chunk({
+                "text": query,
+                "source": "query"
+            })
 
             # Search collection
             results = self.collection.query(
@@ -899,6 +989,7 @@ class IncrementalIndexer:
                     "query_type": analysis.query_type,
                     "confidence": analysis.confidence
                 },
+                "extracted_entities": entities,
                 "results_count": len(results['documents'][0]) if results['documents'] else 0,
                 "results": results
             }
@@ -906,6 +997,175 @@ class IncrementalIndexer:
         except Exception as e:
             logger.error(f"Error in debug search: {e}")
             return {"error": str(e)}
+
+    def search(self, query: str, n_results: int = 5) -> Dict:
+        """Enhanced search with entity awareness and detailed logging."""
+
+        logger.info(f"Starting enhanced search for: '{query[:50]}{'...' if len(query) > 50 else ''}'")
+
+        try:
+            # Generate query embedding
+            logger.info(f"Generating query embedding...")
+            embedding_start_time = time.time()
+            query_response = ollama.embeddings(model=self.embedding_model, prompt=query)
+            query_embedding = query_response['embedding']
+            embedding_time = time.time() - embedding_start_time
+            logger.info(f"Query embedding generated in {embedding_time:.2f}s")
+
+            # Perform base semantic search
+            logger.info(f"Performing semantic search (requesting {n_results * 2} results for reranking)...")
+            search_start_time = time.time()
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=n_results * 2  # Get more for entity reranking
+            )
+            search_time = time.time() - search_start_time
+            logger.info(f"Semantic search complete in {search_time:.2f}s")
+
+            # Extract entities from query
+            logger.info(f"Extracting entities from query...")
+            entities = self.entity_builder.extract_entities_from_chunk({
+                "text": query,
+                "source": "query"
+            })
+
+            entity_count = sum(len(entity_list) for entity_list in entities.values())
+            if entity_count > 0:
+                logger.info(f"Found {entity_count} entities in query: {entities}")
+            else:
+                logger.info(f"No entities detected in query")
+
+            # Validate entity combinations in query
+            logger.info(f"Validating entity combinations...")
+            validation_warnings = []
+            if entities.get("weapons"):
+                # Check for weapon + firing mode combinations
+                firing_modes = self._extract_firing_modes(query)
+                if firing_modes:
+                    logger.info(f"Found firing modes in query: {firing_modes}")
+
+                for weapon in entities["weapons"]:
+                    for mode in firing_modes:
+                        validation = self.entity_storage.validate_weapon_mode(weapon.name, mode)
+                        if not validation.get("valid", True):
+                            warning = validation.get("error", "Invalid combination")
+                            validation_warnings.append(warning)
+                            logger.warning(f"Validation warning: {warning}")
+
+            # Add entity information to results
+            entity_info = {
+                "entities_detected": [],
+                "validation_warnings": validation_warnings,
+                "registry_stats": self.entity_storage.get_registry_stats()
+            }
+
+            # Add detected entities info
+            for entity_type, entity_list in entities.items():
+                for entity in entity_list:
+                    entity_info["entities_detected"].append({
+                        "type": entity_type[:-1],  # Remove 's' from 'weapons', 'spells'
+                        "name": entity.name,
+                        "confidence": 0.8
+                    })
+
+            # Enhance results format
+            enhanced_results = results.copy()
+            enhanced_results["entity_info"] = entity_info
+
+            result_count = len(results.get("documents", [[]])[0])
+            logger.info(f"Search complete. Returning {min(result_count, n_results)} results with entity information")
+
+            return enhanced_results
+
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return {"documents": [[]], "metadatas": [[]], "ids": [[]], "distances": [[]]}
+
+    def _extract_firing_modes(self, query: str) -> List[str]:
+        """Extract firing mode references from query."""
+        mode_patterns = {
+            "burst": r'\bburst\s*(?:fire|mode)?\b',
+            "semi-auto": r'\bsemi[-\s]*auto(?:matic)?\b',
+            "full auto": r'\bfull[-\s]*auto(?:matic)?\b',
+            "single shot": r'\bsingle[-\s]*shot\b'
+        }
+
+        modes = []
+        query_lower = query.lower()
+
+        for mode_name, pattern in mode_patterns.items():
+            if re.search(pattern, query_lower):
+                modes.append(mode_name)
+
+        return modes
+
+    def get_entity_stats(self, entity_name: str, entity_type: str = None):
+        """Get detailed stats for a specific entity with logging."""
+
+        logger.info(f"Looking up entity stats for: '{entity_name}' (type: {entity_type or 'any'})")
+
+        if entity_type == "weapon" or entity_type is None:
+            weapon = self.entity_storage.get_weapon(entity_name)
+            if weapon:
+                logger.info(f"Found weapon: {weapon.name}")
+                return {
+                    "type": "weapon",
+                    "name": weapon.name,
+                    "stats": {
+                        "accuracy": weapon.accuracy,
+                        "damage": weapon.damage,
+                        "ap": weapon.ap,
+                        "mode": weapon.mode,
+                        "rc": weapon.rc,
+                        "ammo": weapon.ammo,
+                        "avail": weapon.avail,
+                        "cost": weapon.cost
+                    },
+                    "category": weapon.category,
+                    "manufacturer": weapon.manufacturer,
+                    "description": weapon.description
+                }
+
+        if entity_type == "spell" or entity_type is None:
+            spell = self.entity_storage.get_spell(entity_name)
+            if spell:
+                logger.info(f"Found spell: {spell.name}")
+                return {
+                    "type": "spell",
+                    "name": spell.name,
+                    "stats": {
+                        "spell_type": spell.spell_type,
+                        "range": spell.range,
+                        "damage": spell.damage,
+                        "duration": spell.duration,
+                        "drain": spell.drain
+                    },
+                    "keywords": spell.keywords,
+                    "category": spell.category,
+                    "description": spell.description
+                }
+
+        logger.info(f"No entity found for: '{entity_name}'")
+        return None
+
+    def validate_weapon_mode(self, weapon_name: str, mode: str) -> Dict:
+        """Validate weapon firing mode capability with logging."""
+        logger.info(f"Validating: {weapon_name} can fire in {mode} mode")
+        result = self.entity_storage.validate_weapon_mode(weapon_name, mode)
+
+        if result.get("valid"):
+            logger.info(f"Validation passed: {weapon_name} supports {mode}")
+        else:
+            logger.warning(f"Validation failed: {result.get('error', 'Unknown error')}")
+
+        return result
+
+    def get_registry_stats(self) -> Dict:
+        """Get entity registry statistics with logging."""
+        logger.info(f"Retrieving entity registry statistics...")
+        stats = self.entity_storage.get_registry_stats()
+        logger.info(f"Registry contains: {stats}")
+        return stats
 
     def optimize_collection(self):
         """Optimize the ChromaDB collection."""
@@ -945,7 +1205,7 @@ class IncrementalIndexer:
             logger.error(f"Error resetting collection: {e}")
 
     def get_chunk_quality_report(self) -> Dict:
-        """Generate a report on chunk quality focusing on table preservation."""
+        """Generate a report on chunk quality focusing on table preservation and entity extraction."""
         try:
             # Sample some chunks to analyze
             sample = self.collection.peek(limit=50)
@@ -958,6 +1218,7 @@ class IncrementalIndexer:
             table_chunks = 0
             text_chunks = 0
             mixed_chunks = 0
+            entity_chunks = 0
 
             token_counts = []
 
@@ -969,6 +1230,9 @@ class IncrementalIndexer:
                         mixed_chunks += 1
                     else:
                         text_chunks += 1
+
+                    if metadata.get('has_entities') == 'true':
+                        entity_chunks += 1
 
                     # Extract token count (stored as string in ChromaDB)
                     token_count = metadata.get('token_count')
@@ -985,7 +1249,8 @@ class IncrementalIndexer:
                 "chunk_distribution": {
                     "table_chunks": table_chunks,
                     "text_chunks": text_chunks,
-                    "mixed_chunks": mixed_chunks
+                    "mixed_chunks": mixed_chunks,
+                    "entity_chunks": entity_chunks
                 },
                 "token_statistics": {
                     "average_tokens": avg_tokens,
@@ -993,7 +1258,9 @@ class IncrementalIndexer:
                     "max_tokens": max(token_counts) if token_counts else 0
                 },
                 "table_preservation_score": (table_chunks / total_chunks * 100) if total_chunks > 0 else 0,
-                "collection_total": self.collection.count()
+                "entity_extraction_rate": (entity_chunks / total_chunks * 100) if total_chunks > 0 else 0,
+                "collection_total": self.collection.count(),
+                "registry_stats": self.entity_storage.get_registry_stats()
             }
 
         except Exception as e:
@@ -1002,6 +1269,12 @@ class IncrementalIndexer:
 
 
 # Factory function for backward compatibility
-def create_incremental_indexer(**kwargs) -> IncrementalIndexer:
-    """Create incremental indexer instance."""
-    return IncrementalIndexer(**kwargs)
+def create_enhanced_indexer(**kwargs):
+    """Create enhanced indexer instance."""
+    return EnhancedIncrementalIndexer(**kwargs)
+
+
+# Alias for backward compatibility with original naming
+def create_incremental_indexer(**kwargs):
+    """Create incremental indexer instance (backward compatibility)."""
+    return EnhancedIncrementalIndexer(**kwargs)
