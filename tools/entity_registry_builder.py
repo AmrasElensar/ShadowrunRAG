@@ -1,6 +1,6 @@
 """
-Entity Registry Builder for Shadowrun RAG System
-Extracts weapons, spells, and IC entities during indexing without breaking existing functionality.
+Updated Entity Registry Builder for Shadowrun RAG System
+Now uses improved patterns for better entity extraction.
 """
 
 import re
@@ -8,6 +8,9 @@ import json
 import logging
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
+
+# Import the improved patterns
+from tools.verified_shadowrun_patterns import IMPROVED_SHADOWRUN_PATTERNS, create_improved_detector_set
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +57,28 @@ class ICStats:
 
 
 class EntityRegistryBuilder:
-    """Builds entity registries from Shadowrun content during indexing."""
+    """Builds entity registries from Shadowrun content using improved patterns."""
 
     def __init__(self):
+        # Load improved detection patterns
+        self.patterns = IMPROVED_SHADOWRUN_PATTERNS
+        self.detectors = create_improved_detector_set()
+
         # Weapon table pattern - matches the exact table format
         self.weapon_table_pattern = re.compile(
             r'\|\s*([^|]+?)\s*\|\s*(\d+(?:\s*\(\d+\))?)\s*\|\s*(\d+[PS](?:\s*\([^)]+\))?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|',
             re.MULTILINE
         )
 
-        # Spell pattern - matches the standardized spell format
+        # Enhanced spell pattern using improved patterns
         self.spell_pattern = re.compile(
-            r'([A-Z\s]+?)\s*\(([^)]+)\)\s*\*\*Type:\*\*\s*([MP])\s*;\s*\*\*Range:\*\*\s*([^;]+?)\s*;\s*\*\*(?:Damage:\*\*\s*([^;]+?)\s*;\s*)?\*\*Duration:\*\*\s*([^;]+?)\s*;\s*\*\*Drain:\*\*\s*([^\n]+)',
+            r'([A-Z][A-Z\s]+?)\s*(?:\([^)]+\))?\s*\*\*Type:\*\*\s*([MP])\s*;\s*\*\*Range:\*\*\s*([^;]+?)\s*;(?:\s*\*\*Damage:\*\*\s*([^;]+?)\s*;)?\s*\*\*Duration:\*\*\s*([^;]+?)\s*;\s*\*\*Drain:\*\*\s*([^\n]+)',
             re.MULTILINE | re.IGNORECASE
         )
 
-        # IC pattern - matches IC attack descriptions
+        # Enhanced IC pattern using improved patterns
         self.ic_pattern = re.compile(
-            r'([A-Z\s]+?)\s*\*\*Attack:\*\*\s*([^v]+?)\s*v\.\s*([^\n]+)',
+            r'([A-Z][A-Z\s]+?)\s*\*\*Attack:\*\*\s*([^v]+?)\s*v\.\s*([^\n]+)',
             re.MULTILINE
         )
 
@@ -81,22 +88,21 @@ class EntityRegistryBuilder:
             re.MULTILINE | re.DOTALL
         )
 
-        # Known weapon categories for context
+        # Enhanced patterns from improved detection
         self.weapon_categories = [
             "LIGHT PISTOLS", "HEAVY PISTOLS", "MACHINE PISTOLS",
             "SUBMACHINE GUNS", "ASSAULT RIFLES", "SNIPER RIFLES",
             "SHOTGUNS", "SPECIAL WEAPONS"
         ]
 
-        # Known spell categories
         self.spell_categories = [
-            "Combat", "Detection", "Health", "Illusion", "Manipulation"
+            "Combat", "Detection", "Health", "Illusion", "Manipulation", "Environmental"
         ]
 
-        logger.info("Entity Registry Builder initialized")
+        logger.info("Enhanced Entity Registry Builder initialized with improved patterns")
 
     def extract_entities_from_chunk(self, chunk: Dict[str, Any]) -> Dict[str, List]:
-        """Extract all entities from a single chunk."""
+        """Extract all entities from a single chunk using improved detection."""
         text = chunk.get("text", "")
         source = chunk.get("source", "")
 
@@ -106,66 +112,30 @@ class EntityRegistryBuilder:
             "ic_programs": []
         }
 
-        # Extract weapons if this looks like weapon content
-        if self._is_weapon_content(text):
+        # Use improved content detection
+        weapon_detection = self.detectors["weapon_detector"](text)
+        spell_detection = self.detectors["spell_detector"](text)
+        ic_detection = self.detectors["ic_detector"](text)
+
+        # Extract weapons if detected
+        if weapon_detection["is_weapon_content"]:
+            logger.debug(f"Weapon content detected (confidence: {weapon_detection['confidence']:.2f})")
             entities["weapons"] = self._extract_weapons(text, source)
 
-        # Extract spells if this looks like magic content
-        if self._is_spell_content(text):
-            entities["spells"] = self._extract_spells(text, source)
+        # Extract spells if detected (improved detection)
+        if spell_detection["is_spell_content"]:
+            logger.debug(f"Spell content detected (confidence: {spell_detection['confidence']:.2f})")
+            entities["spells"] = self._extract_spells(text, source, spell_detection)
 
-        # Extract IC if this looks like Matrix content
-        if self._is_ic_content(text):
-            entities["ic_programs"] = self._extract_ic_programs(text, source)
+        # Extract IC if detected (improved detection)
+        if ic_detection["is_ic_content"]:
+            logger.debug(f"IC content detected (confidence: {ic_detection['confidence']:.2f})")
+            entities["ic_programs"] = self._extract_ic_programs(text, source, ic_detection)
 
         return entities
 
-    def _is_weapon_content(self, text: str) -> bool:
-        """Check if text contains weapon statistics."""
-        # Check for weapon table headers
-        if re.search(r'\|\s*(?:WEAPON|FIREARM|ACC|Damage|AP|Mode)\s*\|', text, re.IGNORECASE):
-            return True
-
-        # Check for weapon categories
-        for category in self.weapon_categories:
-            if category in text.upper():
-                return True
-
-        # Check for weapon manufacturers
-        manufacturers = ["ARES", "COLT", "RUGER", "BROWNING", "REMINGTON"]
-        for mfg in manufacturers:
-            if mfg in text.upper():
-                return True
-
-        return False
-
-    def _is_spell_content(self, text: str) -> bool:
-        """Check if text contains spell definitions."""
-        # Look for spell format patterns
-        if re.search(r'\*\*Type:\*\*\s*[MP]\s*;\s*\*\*Range:\*\*', text):
-            return True
-
-        # Look for spell keywords
-        spell_keywords = ["DRAIN", "FORCE", "MANA", "PHYSICAL", "ASTRAL"]
-        count = sum(1 for keyword in spell_keywords if keyword in text.upper())
-        return count >= 2
-
-    def _is_ic_content(self, text: str) -> bool:
-        """Check if text contains IC program definitions."""
-        # Look for IC attack patterns
-        if re.search(r'\*\*Attack:\*\*.*?v\.', text):
-            return True
-
-        # Look for known IC types
-        ic_types = ["BLACK IC", "BLASTER", "ACID", "BINDER", "KILLER", "PATROL"]
-        for ic_type in ic_types:
-            if ic_type in text.upper():
-                return True
-
-        return False
-
     def _extract_weapons(self, text: str, source: str) -> List[WeaponStats]:
-        """Extract weapon statistics from text."""
+        """Extract weapon statistics from text (existing logic)."""
         weapons = []
 
         # Find current weapon category
@@ -198,7 +168,6 @@ class EntityRegistryBuilder:
 
                 # Extract manufacturer from name
                 weapon.manufacturer = self._extract_manufacturer(weapon.name)
-
                 weapons.append(weapon)
 
         # Extract weapon descriptions
@@ -211,27 +180,20 @@ class EntityRegistryBuilder:
 
         return weapons
 
-    def _extract_spells(self, text: str, source: str) -> List[SpellStats]:
-        """Extract spell statistics from text."""
+    def _extract_spells(self, text: str, source: str, detection_info: Dict = None) -> List[SpellStats]:
+        """Extract spell statistics using improved patterns."""
         spells = []
 
-        # Determine spell category from context
-        current_category = "Unknown"
-        for category in self.spell_categories:
-            if category.lower() in text.lower():
-                current_category = category
-                break
-
-        matches = self.spell_pattern.findall(text)
-        for match in matches:
+        # Method 1: Use formal spell patterns (existing)
+        formal_matches = self.spell_pattern.findall(text)
+        for match in formal_matches:
             if len(match) >= 6:
-                spell_name = match[0].strip()
-                keywords = [k.strip() for k in match[1].split(',')]
-                spell_type = match[2].strip()
-                range_val = match[3].strip()
-                damage = match[4].strip() if match[4] else ""
-                duration = match[5].strip()
-                drain = match[6].strip()
+                spell_name = match[0].strip().title()
+                spell_type = match[1]
+                range_val = match[2].strip()
+                damage = match[3].strip() if match[3] else ""
+                duration = match[4].strip()
+                drain = match[5].strip()
 
                 spell = SpellStats(
                     name=spell_name,
@@ -240,63 +202,210 @@ class EntityRegistryBuilder:
                     damage=damage,
                     duration=duration,
                     drain=drain,
-                    keywords=keywords,
-                    category=current_category
+                    keywords=[],
+                    category=self._determine_spell_category(spell_name, text),
+                    description=self._extract_spell_description(spell_name, text)
                 )
-
                 spells.append(spell)
+
+        # Method 2: Use improved pattern matching for spell names
+        if detection_info and detection_info.get("found_spells"):
+            known_spells = self.patterns["magic"]["specific_spells"]
+            text_upper = text.upper()
+
+            for spell_name in detection_info["found_spells"]:
+                # Skip if already found by formal pattern
+                if any(s.name.lower() == spell_name.lower() for s in spells):
+                    continue
+
+                # Look for spell name in text and try to extract basic info
+                if spell_name.upper() in text_upper:
+                    # Try to find spell format around this name
+                    spell_context = self._extract_spell_context(spell_name, text)
+                    if spell_context:
+                        spell = SpellStats(
+                            name=spell_name.title(),
+                            spell_type=spell_context.get("type", "Unknown"),
+                            range=spell_context.get("range", "Unknown"),
+                            damage=spell_context.get("damage", ""),
+                            duration=spell_context.get("duration", "Unknown"),
+                            drain=spell_context.get("drain", "Unknown"),
+                            keywords=spell_context.get("keywords", []),
+                            category=self._determine_spell_category(spell_name, text),
+                            description=spell_context.get("description", "")
+                        )
+                        spells.append(spell)
 
         return spells
 
-    def _extract_ic_programs(self, text: str, source: str) -> List[ICStats]:
-        """Extract IC program statistics from text."""
+    def _extract_ic_programs(self, text: str, source: str, detection_info: Dict = None) -> List[ICStats]:
+        """Extract IC program statistics using improved patterns."""
         ic_programs = []
 
-        matches = self.ic_pattern.findall(text)
-        for match in matches:
+        # Method 1: Use formal IC attack patterns (existing)
+        formal_matches = self.ic_pattern.findall(text)
+        for match in formal_matches:
             if len(match) >= 3:
                 ic_name = match[0].strip()
                 attack_pattern = match[1].strip()
                 resistance_test = match[2].strip()
 
-                # Extract effect description from following text
-                effect_desc = self._extract_ic_description(text, ic_name)
-
                 ic = ICStats(
                     name=ic_name,
                     attack_pattern=attack_pattern,
                     resistance_test=resistance_test,
-                    effect_description=effect_desc
+                    effect_description=self._extract_ic_description(ic_name, text),
+                    category="IC"
                 )
-
                 ic_programs.append(ic)
+
+        # Method 2: Use improved pattern matching for known IC types
+        if detection_info and detection_info.get("found_programs"):
+            text_upper = text.upper()
+
+            for ic_name in detection_info["found_programs"]:
+                # Skip if already found by formal pattern
+                if any(ic.name.lower() == ic_name.lower() for ic in ic_programs):
+                    continue
+
+                # Look for IC name and try to extract attack info
+                if ic_name.upper() in text_upper:
+                    ic_context = self._extract_ic_context(ic_name, text)
+                    if ic_context:
+                        ic = ICStats(
+                            name=ic_name.title(),
+                            attack_pattern=ic_context.get("attack_pattern", "Unknown"),
+                            resistance_test=ic_context.get("resistance_test", "Unknown"),
+                            effect_description=ic_context.get("description", ""),
+                            category="IC"
+                        )
+                        ic_programs.append(ic)
 
         return ic_programs
 
-    def _extract_manufacturer(self, weapon_name: str) -> str:
-        """Extract manufacturer from weapon name."""
-        manufacturers = {
-            "ares": "Ares",
-            "colt": "Colt",
-            "ruger": "Ruger",
-            "browning": "Browning",
-            "remington": "Remington",
-            "defiance": "Defiance",
-            "fichetti": "Fichetti",
-            "beretta": "Beretta",
-            "yamaha": "Yamaha"
-        }
+    def _extract_spell_context(self, spell_name: str, text: str) -> Optional[Dict[str, str]]:
+        """Extract spell context from surrounding text."""
+        # Look for spell format patterns around the spell name
+        spell_patterns = self.patterns["magic"]["spell_format_patterns"]
 
-        weapon_lower = weapon_name.lower()
-        for key, name in manufacturers.items():
-            if key in weapon_lower:
-                return name
+        for pattern in spell_patterns:
+            # Search for pattern near the spell name
+            context_pattern = f"{re.escape(spell_name)}.*?{pattern}"
+            match = re.search(context_pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                context_text = match.group()
+                return self._parse_spell_format(context_text)
+
+        return None
+
+    def _extract_ic_context(self, ic_name: str, text: str) -> Optional[Dict[str, str]]:
+        """Extract IC context from surrounding text."""
+        # Look for attack patterns around the IC name
+        attack_patterns = self.patterns["matrix"]["ic_attack_patterns"]
+
+        for pattern in attack_patterns:
+            # Search for pattern near the IC name
+            context_pattern = f"{re.escape(ic_name)}.*?{pattern}"
+            match = re.search(context_pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                context_text = match.group()
+                return self._parse_ic_format(context_text)
+
+        return None
+
+    def _parse_spell_format(self, context_text: str) -> Dict[str, str]:
+        """Parse spell format from context text."""
+        result = {}
+
+        # Extract Type
+        type_match = re.search(r'Type:\*\*\s*([MP])', context_text, re.IGNORECASE)
+        if type_match:
+            result["type"] = type_match.group(1)
+
+        # Extract Range
+        range_match = re.search(r'Range:\*\*\s*([^;]+)', context_text, re.IGNORECASE)
+        if range_match:
+            result["range"] = range_match.group(1).strip()
+
+        # Extract Duration
+        duration_match = re.search(r'Duration:\*\*\s*([^;]+)', context_text, re.IGNORECASE)
+        if duration_match:
+            result["duration"] = duration_match.group(1).strip()
+
+        # Extract Drain
+        drain_match = re.search(r'Drain:\*\*\s*([^\n]+)', context_text, re.IGNORECASE)
+        if drain_match:
+            result["drain"] = drain_match.group(1).strip()
+
+        return result
+
+    def _parse_ic_format(self, context_text: str) -> Dict[str, str]:
+        """Parse IC format from context text."""
+        result = {}
+
+        # Extract attack pattern
+        attack_match = re.search(r'Attack:\*\*\s*([^v]+?)\s*v\.', context_text, re.IGNORECASE)
+        if attack_match:
+            result["attack_pattern"] = attack_match.group(1).strip()
+
+        # Extract resistance test
+        resistance_match = re.search(r'v\.\s*([^\n]+)', context_text, re.IGNORECASE)
+        if resistance_match:
+            result["resistance_test"] = resistance_match.group(1).strip()
+
+        return result
+
+    def _determine_spell_category(self, spell_name: str, text: str) -> str:
+        """Determine spell category from context."""
+        spell_lower = spell_name.lower()
+        text_lower = text.lower()
+
+        # Combat spells
+        if any(term in spell_lower for term in ["bolt", "ball", "touch", "shatter"]):
+            return "Combat"
+
+        # Detection spells
+        if any(term in spell_lower for term in ["detect", "analyze", "sense"]):
+            return "Detection"
+
+        # Manipulation spells
+        if any(term in spell_lower for term in ["control", "levitate", "fingers", "armor"]):
+            return "Manipulation"
+
+        # Environmental spells
+        if any(term in spell_lower for term in ["barrier", "light", "sheet"]):
+            return "Environmental"
+
+        # Health spells
+        if any(term in spell_lower for term in ["heal", "cure", "increase", "decrease"]):
+            return "Health"
 
         return "Unknown"
 
-    def _extract_ic_description(self, text: str, ic_name: str) -> str:
-        """Extract IC effect description from surrounding text."""
-        # Find the IC name in text and extract the following paragraph
+    def _extract_manufacturer(self, weapon_name: str) -> str:
+        """Extract manufacturer from weapon name."""
+        manufacturers = self.patterns["gear"]["manufacturers"]
+
+        for mfg in manufacturers:
+            if mfg.lower() in weapon_name.lower():
+                return mfg.title()
+
+        return ""
+
+    def _extract_spell_description(self, spell_name: str, text: str) -> str:
+        """Extract spell description from text."""
+        # Look for description paragraph after spell name
+        pattern = re.compile(f"{re.escape(spell_name)}.*?\n\n([^*]+?)(?=\n\n|\*\*|$)", re.DOTALL | re.IGNORECASE)
+        match = pattern.search(text)
+
+        if match:
+            return match.group(1).strip()
+
+        return ""
+
+    def _extract_ic_description(self, ic_name: str, text: str) -> str:
+        """Extract IC description from text."""
+        # Look for description paragraph after IC name
         pattern = re.compile(f"{re.escape(ic_name)}.*?\n\n([^*]+?)(?=\n\n|\*\*|$)", re.DOTALL | re.IGNORECASE)
         match = pattern.search(text)
 
@@ -305,8 +414,7 @@ class EntityRegistryBuilder:
 
         return ""
 
-    def validate_weapon_capability(self, weapon_name: str, requested_mode: str, weapons_registry: List[WeaponStats]) -> \
-    Dict[str, Any]:
+    def validate_weapon_capability(self, weapon_name: str, requested_mode: str, weapons_registry: List[WeaponStats]) -> Dict[str, Any]:
         """Validate if a weapon supports a requested firing mode."""
         for weapon in weapons_registry:
             if weapon_name.lower() in weapon.name.lower():
@@ -339,35 +447,41 @@ class EntityRegistryBuilder:
 
 # Factory function for integration
 def create_entity_registry_builder() -> EntityRegistryBuilder:
-    """Create entity registry builder instance."""
+    """Create enhanced entity registry builder instance."""
     return EntityRegistryBuilder()
 
 
 # Test function for validation
-def test_registry_extraction():
-    """Test the registry extraction on sample content."""
+def test_enhanced_extraction():
+    """Test the enhanced extraction on sample content."""
     builder = create_entity_registry_builder()
 
-    # Test weapon extraction
-    weapon_text = """
-| Weapon | ACC | Damage | AP | Mode | RC | Ammo | Avail | Cost |
-| Ares Predator V | 5 (7) | 8P | –1 | SA | — | 15 (c) | 5R | 725¥ |
-| Ares Viper Slivergun | 4 | 9P (f) | +4 | SA/BF | — | 30 (c) | 8F | 380¥ |
+    # Test spell extraction
+    spell_text = """
+FIREBALL (INDIRECT, ELEMENTAL)
 
-**Ares Predator V:** The newest iteration of the most popular handgun in the world.
+**Type:** P ; **Range:** LOS (A) ; **Damage:** P ; **Duration:** I ; **Drain:** F – 1
+
+These spells create an explosion of flames that flash into existence and scorch the target(s).
+
+MANABOLT (DIRECT)
+
+**Type:** M ; **Range:** LOS ; **Damage:** P ; **Duration:** I ; **Drain:** F – 3
+
+Manabolt channels destructive magical power into the target, doing Physical damage.
     """
 
-    test_chunk = {"text": weapon_text, "source": "test"}
+    test_chunk = {"text": spell_text, "source": "test"}
     entities = builder.extract_entities_from_chunk(test_chunk)
 
-    print("Extracted Weapons:")
-    for weapon in entities["weapons"]:
-        print(f"  {weapon.name}: {weapon.mode} mode, {weapon.manufacturer}")
+    print("Enhanced Extraction Test:")
+    print(f"Extracted {len(entities['spells'])} spells:")
+    for spell in entities["spells"]:
+        print(f"  {spell.name}: {spell.spell_type} type, {spell.drain} drain")
 
-    # Test validation
-    validation = builder.validate_weapon_capability("Ares Predator", "burst fire", entities["weapons"])
-    print(f"Burst fire validation: {validation}")
+    print(f"Extracted {len(entities['weapons'])} weapons")
+    print(f"Extracted {len(entities['ic_programs'])} IC programs")
 
 
 if __name__ == "__main__":
-    test_registry_extraction()
+    test_enhanced_extraction()

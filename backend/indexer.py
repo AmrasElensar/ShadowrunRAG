@@ -44,8 +44,8 @@ class EnhancedIncrementalIndexer:
         chroma_path: str = "data/chroma_db",
         collection_name: str = "shadowrun_docs",
         embedding_model: str = "nomic-embed-text",
-        chunk_size: int = 800,
-        chunk_overlap: int = 150,
+        chunk_size: int = 1200,
+        chunk_overlap: int = 200,
         use_semantic_splitting: bool = True,
         entity_db_path: str = "data/entity_registry.db"
     ):
@@ -1204,7 +1204,128 @@ class EnhancedIncrementalIndexer:
         except Exception as e:
             logger.error(f"Error resetting collection: {e}")
 
-    def get_chunk_quality_report(self) -> Dict:
+    def reextract_entities_from_existing(self, entity_types: List[str] = None, chunk_limit: int = None, force_update: bool = False) -> Dict:
+        """Re-extract entities from existing chunks with improved patterns without reindexing."""
+
+        logger.info("Starting entity re-extraction from existing chunks")
+
+        if entity_types:
+            logger.info(f"Targeting specific entity types: {entity_types}")
+        else:
+            logger.info("Re-extracting all entity types")
+
+        # Get all chunks or filtered chunks
+        if chunk_limit:
+            logger.info(f"Processing limited to {chunk_limit} chunks")
+            all_chunks = self.collection.get(include=['documents', 'metadatas', 'ids'], limit=chunk_limit)
+        else:
+            all_chunks = self.collection.get(include=['documents', 'metadatas', 'ids'])
+
+        chunks_to_process = all_chunks['ids']
+
+        if not force_update:
+            # Only process chunks that don't have entities or need updating
+            chunks_to_process = []
+            for i, metadata in enumerate(all_chunks['metadatas']):
+                if not metadata or not metadata.get('has_entities'):
+                    chunks_to_process.append(all_chunks['ids'][i])
+
+            logger.info(f"Found {len(chunks_to_process)} chunks without entities")
+        else:
+            logger.info(f"Force update enabled - processing all {len(chunks_to_process)} chunks")
+
+        # Reset statistics for this run
+        extraction_stats = {
+            "chunks_processed": 0,
+            "chunks_with_new_entities": 0,
+            "weapons_found": 0,
+            "spells_found": 0,
+            "ic_programs_found": 0,
+            "total_entities_found": 0
+        }
+
+        start_time = time.time()
+
+        for i, chunk_id in enumerate(chunks_to_process):
+            # Get the corresponding document and metadata
+            doc_index = all_chunks['ids'].index(chunk_id)
+            document = all_chunks['documents'][doc_index]
+            metadata = all_chunks['metadatas'][doc_index] or {}
+
+            logger.info(f"Processing chunk {i + 1}/{len(chunks_to_process)}: {chunk_id}")
+
+            # Create chunk object for entity extraction
+            chunk = {
+                "id": chunk_id,
+                "text": document,
+                "source": metadata.get('source', 'unknown'),
+                "metadata": metadata
+            }
+
+            # Extract entities with updated patterns
+            entities = self.entity_builder.extract_entities_from_chunk(chunk)
+
+            # Store entities if any found
+            if any(entities.values()):
+                source = metadata.get('source', 'reextraction')
+                self.entity_storage.store_entities(entities, chunk_id, source)
+
+                # Update statistics
+                entity_counts = {
+                    "weapons": len(entities.get("weapons", [])),
+                    "spells": len(entities.get("spells", [])),
+                    "ic_programs": len(entities.get("ic_programs", []))
+                }
+
+                total_chunk_entities = sum(entity_counts.values())
+
+                extraction_stats["chunks_with_new_entities"] += 1
+                extraction_stats["weapons_found"] += entity_counts["weapons"]
+                extraction_stats["spells_found"] += entity_counts["spells"]
+                extraction_stats["ic_programs_found"] += entity_counts["ic_programs"]
+                extraction_stats["total_entities_found"] += total_chunk_entities
+
+                logger.info(f"  Found {total_chunk_entities} entities: {entity_counts}")
+
+                # Update chunk metadata in ChromaDB (optional - preserves the has_entities flag)
+                try:
+                    updated_metadata = metadata.copy()
+                    updated_metadata["has_entities"] = True
+                    updated_metadata["entity_extraction_version"] = "2.0"  # Version tracking
+
+                    # Update the metadata in ChromaDB
+                    self.collection.update(
+                        ids=[chunk_id],
+                        metadatas=[self._clean_metadata_for_chroma(updated_metadata)]
+                    )
+                except Exception as e:
+                    logger.warning(f"  Could not update chunk metadata: {e}")
+
+            else:
+                logger.info(f"  No entities found")
+
+            extraction_stats["chunks_processed"] += 1
+
+            # Progress reporting
+            if (i + 1) % 25 == 0:
+                elapsed = time.time() - start_time
+                rate = (i + 1) / elapsed
+                eta = (len(chunks_to_process) - i - 1) / rate if rate > 0 else 0
+                logger.info(f"Progress: {i + 1}/{len(chunks_to_process)} ({rate:.1f}/sec, ETA: {eta:.0f}s)")
+
+        total_elapsed = time.time() - start_time
+        final_registry_stats = self.entity_storage.get_registry_stats()
+
+        logger.info(f"Entity re-extraction complete in {total_elapsed:.1f}s")
+        logger.info(f"Results: {extraction_stats}")
+        logger.info(f"Updated registry: {final_registry_stats}")
+
+        return {
+            "success": True,
+            "extraction_stats": extraction_stats,
+            "final_registry_stats": final_registry_stats,
+            "processing_time": total_elapsed
+        }
         """Generate a report on chunk quality focusing on table preservation and entity extraction."""
         try:
             # Sample some chunks to analyze
